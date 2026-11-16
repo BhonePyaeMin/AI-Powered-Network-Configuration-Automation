@@ -2016,6 +2016,32 @@ async function gns3LoadLiveTopology(projectId) {
     }
 }
 
+// ── Automation report (download + saved in results/) ─────────────────────────
+async function gns3GenerateReport() {
+    if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
+    const btn = document.getElementById('btn-gns3-report');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> Building report…'; lucide.createIcons({nodes:[btn]}); }
+    gns3Log('INFO', 'Generating automation report (reads every device, runs ping tests)…');
+    try {
+        const r = await fetch(`/gns3-api/projects/${gns3ProjectId}/report`, { method: 'POST' });
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || 'Report failed');
+        const blob = new Blob([j.report], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = j.filename;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        gns3Log('OK', `Report saved: results/${j.filename} (ping ${j.summary.ping_ok}/${j.summary.ping_total}, OSPF FULL: ${j.summary.ospf_full})`);
+        showToast('success', 'Report Generated', `${j.filename} downloaded and saved in results/.`);
+    } catch (e) {
+        gns3Log('ERROR', `Report failed: ${e.message}`);
+        showToast('fail', 'Report Failed', e.message);
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="file-text"></i> Generate Report'; lucide.createIcons({nodes:[btn]}); }
+    }
+}
+
 // ── Real ping test between all PCs (runs on the PCs' consoles) ────────────────
 async function gns3RunPingTest() {
     if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
@@ -2209,7 +2235,10 @@ async function gns3ShowPreview() {
         const r = await fetch('/gns3-api/config-preview', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ ai_devices: gns3AiDevices })
+            body: JSON.stringify({
+                ai_devices:  gns3AiDevices,
+                connections: (currentGns3 && currentGns3._ai_topology && currentGns3._ai_topology.connections) || []
+            })
         });
         const j = await r.json();
 

@@ -50,6 +50,11 @@ _ENV_FILE = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
 )
 
+# Persistent activity log (PRD security requirement: configuration activity logging)
+_ACTIVITY_LOG = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "activity.log")
+)
+
 # Explicit proxy bypass — works reliably on Windows inside HTTP server threads
 _NO_PROXY = {"http": None, "https": None}
 
@@ -91,6 +96,13 @@ def _log(level: str, message: str):
     }
     with _log_lock:
         _logs.append(entry)
+        try:
+            os.makedirs(os.path.dirname(_ACTIVITY_LOG), exist_ok=True)
+            with open(_ACTIVITY_LOG, "a", encoding="utf-8") as fh:
+                one_line = " | ".join(str(message).splitlines())
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{entry['level']}] {one_line}\n")
+        except Exception:
+            pass
     print(f"[GNS3][{entry['level']}] {message}")
 
 def get_logs() -> list[dict]:
@@ -468,7 +480,7 @@ def _normalize_iface_name(raw: str) -> str:
     if lraw.startswith("gig") or lraw.startswith("g"):
         rest = re.sub(r"^g(?:iga)?(?:bit)?(?:ethernet)?", "", lraw)
         return f"GigabitEthernet{rest}"
-    if lraw.startswith("fa") or lraw.startswith("f0"):
+    if lraw.startswith("fa") or re.match(r"^f\d", lraw):
         rest = re.sub(r"^f(?:ast)?(?:ethernet)?", "", lraw)
         return f"FastEthernet{rest}"
     if lraw.startswith("eth"):
@@ -491,7 +503,7 @@ def _map_ai_ifaces_to_hw(ai_interfaces: list, gns3_node: dict, ai_connections: l
     Falls back to index-based mapping if graph mapping fails.
     """
     if not gns3_node:
-        return [{"hw_name": _normalize_iface_name(i.get("name", "")),
+        return [{"hw_name": _normalize_iface_name(i.get("name", "")), "ai_name": i.get("name", ""),
                  "ip": i.get("ip", ""), "gateway": i.get("gateway", "")}
                 for i in ai_interfaces]
 
@@ -564,6 +576,7 @@ def _map_ai_ifaces_to_hw(ai_interfaces: list, gns3_node: dict, ai_connections: l
 
         result.append({
             "hw_name": hw_name,
+            "ai_name": ai_iname,
             "ip":      ai_iface.get("ip", ""),
             "gateway": ai_iface.get("gateway", ""),
         })
@@ -681,6 +694,16 @@ def generate_device_commands(device: dict, gns3_node: dict = None,
     # Router (default) — map AI interface names to real hardware port names
     mapped = _map_ai_ifaces_to_hw(interfaces, gns3_node, connections)
     cmds = ["end", "enable", "configure terminal", f"hostname {name}"]
+
+    # Who is on the other end of each interface (used for descriptions)
+    peers = {}
+    for conn in (connections or []):
+        if conn.get("from_device") == name:
+            peers[conn.get("from_interface")] = conn.get("to_device")
+        elif conn.get("to_device") == name:
+            peers[conn.get("to_interface")] = conn.get("from_device")
+
+    routed_nets = []
     for m in mapped:
         ip_str = m["ip"]
         hw     = m["hw_name"]
@@ -690,19 +713,34 @@ def generate_device_commands(device: dict, gns3_node: dict = None,
         if ip_str and ip_str.split("/")[0] in ("0.0.0.0", ""):
             ip_str = ""
         cmds.append(f"interface {hw}")
+        peer = peers.get(m.get("ai_name"))
+        if peer:
+            cmds.append(f"description Link to {peer}")
         if ip_str:
             ip, mask = _cidr_to_mask(ip_str)
             # Clear stale IPs from previous (incorrect) apply runs
             cmds += ["no ip address", f"ip address {ip} {mask}", "no shutdown"]
+            try:
+                routed_nets.append(ipaddress.IPv4Interface(ip_str).network)
+            except ValueError:
+                pass
         else:
             cmds.append("no shutdown")
         cmds.append("exit")
 
-    # Auto-generate static routes when full device list is provided
     if all_devices:
-        routes = _build_static_routes(device, all_devices)
-        if routes:
-            cmds += routes
+        # Static routes written by earlier runs are removed; OSPF provides the routes now.
+        for route in _build_static_routes(device, all_devices):
+            cmds.append("no " + route)
+
+        other_routers = [d for d in all_devices
+                         if d.get("type", "").lower() == "router"
+                         and (d.get("label") or d.get("id")) != name]
+        if other_routers and routed_nets:
+            cmds.append("router ospf 1")
+            for net in routed_nets:
+                cmds.append(f"network {net.network_address} {net.hostmask} area 0")
+            cmds.append("exit")
 
     cmds += ["end", "write memory"]
     return cmds
@@ -962,7 +1000,7 @@ def apply_configuration(project_id: str, device_mapping: list[dict],
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands to run to "verify" the config worked
 _VERIFY_COMMANDS = {
-    "router":   ["show ip interface brief", "show ip route"],
+    "router":   ["show ip interface brief", "show ip ospf neighbor", "show ip route"],
     "switch":   ["show ip interface brief", "show vlan brief"],
     "pc":       ["show ip"],
     "vpcs":     ["show ip"],
@@ -1106,7 +1144,7 @@ def verify_configuration(project_id: str, device_mapping: list[dict],
 # CONFIG PREVIEW (for UI display before applying)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_config_preview(ai_devices: list[dict]) -> dict:
+def build_config_preview(ai_devices: list[dict], connections: list = None) -> dict:
     """
     Generate a human-readable configuration preview for all AI devices.
     Returns {"ok": True, "preview": {"R1": ["cmd1", ...], ...}, "warnings": [...]}
@@ -1115,7 +1153,7 @@ def build_config_preview(ai_devices: list[dict]) -> dict:
     warnings = []
     for dev in ai_devices:
         name  = dev.get("label") or dev.get("id") or "Unknown"
-        cmds  = generate_device_commands(dev)
+        cmds  = generate_device_commands(dev, all_devices=ai_devices, connections=connections)
         warns = validate_device_config(dev)
         preview[name] = cmds
         if warns:
@@ -1153,6 +1191,8 @@ def get_live_ips(project_id: str) -> dict:
             return None, None
             
         node_type = node.get("node_type", "dynamips").lower()
+        if "switch" in node_type or node_type in ("ethernet_hub", "cloud", "nat"):
+            return None, None
         if node_type == "vpcs" or name.startswith("PC"):
             # PC Node
             r = _telnet_send_commands(console_host, console_port, ["show ip"], timeout=15)
@@ -1465,3 +1505,166 @@ def run_ping_matrix(project_id: str, count: int = 3) -> dict:
     ok = sum(r["status"] == "SUCCESS" for r in out)
     _log("OK" if ok == len(out) else "WARN", f"Ping test: {ok}/{len(out)} paths reachable")
     return {"ok": True, "results": out}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTOMATION REPORT (PRD FR-6)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RESULTS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results")
+)
+
+
+def _console_run(host: str, port: int, cmds: list, gap: float = 1.0, tail: float = 1.5) -> str:
+    """Send commands to a device console and return what they printed (without old scrollback)."""
+    sock = socket.create_connection((host, port), timeout=8)
+
+    def read(wait):
+        buf, end = b"", time.time() + wait
+        while time.time() < end:
+            try:
+                sock.settimeout(0.2)
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                i, clean = 0, bytearray()
+                while i < len(chunk):
+                    if chunk[i] == 255 and i + 2 < len(chunk):
+                        if chunk[i + 1] in (253, 251):
+                            sock.sendall(bytes([255, 252 if chunk[i + 1] == 253 else 254, chunk[i + 2]]))
+                        i += 3
+                    else:
+                        clean.append(chunk[i])
+                        i += 1
+                buf += bytes(clean)
+            except socket.timeout:
+                pass
+            except Exception:
+                break
+        return buf.decode("ascii", "replace")
+
+    out = ""
+    try:
+        sock.sendall(b"\r\n")
+        out += read(1.0)
+        for c in cmds:
+            sock.sendall((c + "\r\n").encode())
+            out += read(gap)
+        out += read(tail)
+    finally:
+        sock.close()
+    out = out.replace("\r", "")
+    # The console replays its history when we connect; our first command is the last one echoed.
+    cut = out.rfind(cmds[0])
+    if cut >= 0:
+        out = out[cut:]
+    return "\n".join(l.rstrip() for l in out.splitlines() if l.strip())
+
+
+def build_report(project_id: str) -> dict:
+    """
+    Collect topology, addressing, live device state and real ping results into a
+    text report, save it under results/, and return it.
+    """
+    topo = get_project_topology(project_id)
+    if not topo.get("ok"):
+        return topo
+    nodes_res = get_project_nodes(project_id)
+    if not nodes_res.get("ok"):
+        return nodes_res
+    nodes = {n["name"]: n for n in nodes_res["nodes"]}
+    ai = topo["_ai_topology"]
+    devices = ai["devices"]
+    try:
+        version = _get("version").get("version", "?")
+    except Exception:
+        version = "?"
+
+    # Live state of every device (in parallel)
+    state, lock = {}, threading.Lock()
+
+    def collect(dev):
+        n = nodes.get(dev["id"])
+        if not n or not n.get("console") or n.get("status") != "started":
+            return
+        try:
+            if dev["type"] == "router":
+                cmds = ["terminal length 0", "show ip interface brief", "show ip ospf neighbor", "show ip route"]
+                text = _console_run(n["console_host"], n["console"], cmds, gap=1.3)
+            elif dev["type"] == "pc":
+                text = _console_run(n["console_host"], n["console"], ["show ip"], gap=1.0)
+            else:
+                return
+        except Exception as e:
+            text = f"(could not read console: {e})"
+        with lock:
+            state[dev["id"]] = text
+
+    threads = [threading.Thread(target=collect, args=(d,)) for d in devices]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ping = run_ping_matrix(project_id)
+    pings = ping.get("results", []) if ping.get("ok") else []
+
+    n_r = sum(d["type"] == "router" for d in devices)
+    n_s = sum(d["type"] == "switch" for d in devices)
+    n_p = sum(d["type"] == "pc" for d in devices)
+    ospf_full = sum(len(re.findall(r"\bFULL/", t)) for d, t in
+                    ((dev, state.get(dev["id"], "")) for dev in devices if dev["type"] == "router"))
+    ping_ok = sum(p["status"] == "SUCCESS" for p in pings)
+    ifaces_up = sum(len(re.findall(r"\bup\s+up\b", state.get(d["id"], ""))) for d in devices if d["type"] == "router")
+
+    line = "=" * 74
+    sub = "-" * 74
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    out = [line, " AI-BASED AUTOMATIC NETWORK CONFIGURATION SYSTEM - AUTOMATION REPORT", line,
+           f"Generated    : {now}",
+           f"GNS3 project : {topo.get('name')}   (GNS3 server v{version})",
+           f"Devices      : {len(devices)}  ({n_r} routers, {n_s} switches, {n_p} PCs)",
+           f"Links        : {len(ai['connections'])}",
+           f"Subnets      : {len(ai['subnets'])}", "",
+           "1. TOPOLOGY (links read from GNS3)", sub]
+    for c in ai["connections"]:
+        out.append(f"   {c['from_device']:<9}{c['from_interface']:<7} <---->  {c['to_device']:<9}{c['to_interface']}")
+    out += ["", "2. ADDRESSING PLAN", sub]
+    for s in ai["subnets"]:
+        out.append(f"   {s['network']:<18} {s['label']}")
+    out.append("")
+    for d in devices:
+        for i in d["interfaces"]:
+            gw = f"  gateway {i['gateway']}" if i.get("gateway") else ""
+            out.append(f"   {d['id']:<9}{i['name']:<7} {i.get('ip', ''):<18}{gw}")
+    out += ["", "3. DEVICE VERIFICATION (live output from the devices)", sub]
+    for d in devices:
+        if d["type"] == "switch":
+            out += [f"[{d['id']}] unmanaged GNS3 switch - no configuration required", ""]
+        elif d["id"] in state:
+            out += [f"[{d['id']}]", state[d["id"]], ""]
+        else:
+            out += [f"[{d['id']}] not running - no data", ""]
+    out += ["4. CONNECTIVITY (real ping tests run from each PC)", sub,
+            f"   {'Source':<8}{'Destination':<24}{'Result':<9}{'Replies':<9}Min/Avg/Max (ms)"]
+    for p in pings:
+        rtt = f"{p['min']}/{p['avg']}/{p['max']}" if p["status"] == "SUCCESS" else "-"
+        out.append(f"   {p['source']:<8}{p['dest_ip'] + ' (' + p['dest'] + ')':<24}{p['status']:<9}"
+                   f"{str(p['replies']) + '/' + str(p['sent']):<9}{rtt}")
+    out += ["", "5. SUMMARY", sub,
+            f"   Router interfaces up/up      : {ifaces_up}",
+            f"   OSPF adjacencies in FULL     : {ospf_full}",
+            f"   Ping paths reachable         : {ping_ok}/{len(pings)}",
+            f"   OVERALL RESULT               : "
+            + ("PASS" if pings and ping_ok == len(pings) else "CHECK"), "", line]
+    text = "\n".join(out) + "\n"
+
+    os.makedirs(_RESULTS_DIR, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", topo.get("name") or "project")
+    filename = f"network_report_{safe}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    with open(os.path.join(_RESULTS_DIR, filename), "w", encoding="utf-8") as fh:
+        fh.write(text)
+    _log("OK", f"Report saved: results/{filename}")
+    return {"ok": True, "filename": filename, "report": text,
+            "summary": {"ping_ok": ping_ok, "ping_total": len(pings), "ospf_full": ospf_full}}
