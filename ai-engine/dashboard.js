@@ -1981,6 +1981,10 @@ async function gns3OnProjectChange(projectId) {
         // Make the website show the real GNS3 topology (incl. switches and links)
         await gns3LoadLiveTopology(projectId);
 
+        // Start listening to the device consoles so pings typed in GNS3 show up here
+        const autoChk = document.getElementById('chk-auto-sync');
+        if (autoChk && !autoChk.checked) { autoChk.checked = true; gns3ToggleAutoSync(true); }
+
         // Render node badges
         if (nodesEl) {
             nodesEl.innerHTML = gns3Nodes.map(n => {
@@ -2093,14 +2097,16 @@ async function gns3SyncConsolePings(silent) {
         if (body) {
             body.innerHTML = rows.length ? rows.map(p => `
                 <tr>
+                    <td class="metrics">${escHtml(p.time || '')}</td>
                     <td class="ping-source"><i data-lucide="terminal" class="table-icon"></i> ${escHtml(p.source)}</td>
                     <td class="ping-dest">${escHtml(p.dest_ip)}${p.dest ? ' (' + escHtml(p.dest) + ')' : ''}</td>
                     <td><span class="status-pill ${p.status==='SUCCESS'?'status-success':'status-fail'}">
                         <span class="status-dot-inner"></span>${p.status}</span></td>
                     <td class="metrics">${p.replies}/${p.sent}</td>
                     <td class="metrics">${p.status==='SUCCESS' ? `${fmt(p.min)}/${fmt(p.avg)}/${fmt(p.max)}` : '—'}</td>
+                    <td class="metrics">${escHtml(p.origin || '')}</td>
                 </tr>`).join('')
-                : '<tr><td colspan="5" class="loading">No pings found in the console history yet. Run a ping in GNS3, then sync again.</td></tr>';
+                : '<tr><td colspan="7" class="loading">No pings yet. Type a ping in a router or PC console in GNS3 and it will appear here.</td></tr>';
             lucide.createIcons({ nodes: [body] });
         }
         if (!silent) {
@@ -2119,7 +2125,7 @@ function gns3ToggleAutoSync(on) {
     if (gns3AutoSyncTimer) { clearInterval(gns3AutoSyncTimer); gns3AutoSyncTimer = null; }
     if (on) {
         gns3SyncConsolePings(true);
-        gns3AutoSyncTimer = setInterval(() => gns3SyncConsolePings(true), 10000);
+        gns3AutoSyncTimer = setInterval(() => gns3SyncConsolePings(true), 5000);
     }
 }
 

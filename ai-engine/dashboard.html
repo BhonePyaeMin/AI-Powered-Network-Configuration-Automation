@@ -185,21 +185,21 @@
                 </div>
                 <div class="manual-ping" id="seen-pings">
                     <div class="manual-ping-title" style="flex-wrap: wrap;">
-                        <i data-lucide="history"></i> Pings tested in the GNS3 consoles
+                        <i data-lucide="history"></i> Ping history of the GNS3 consoles (routers and PCs)
                         <button class="control-btn" id="btn-sync-pings" onclick="gns3SyncConsolePings()"
                                 style="margin-left:auto; font-size:.85rem; padding:.4rem .8rem; border-color: rgba(168,85,247,.4); color: var(--accent-purple);">
                             <i data-lucide="download"></i> Sync from GNS3
                         </button>
                         <label style="font-weight:400; font-size:.85rem; display:flex; align-items:center; gap:.4rem;">
-                            <input type="checkbox" id="chk-auto-sync" onchange="gns3ToggleAutoSync(this.checked)"> Auto-sync every 10 s
+                            <input type="checkbox" id="chk-auto-sync" onchange="gns3ToggleAutoSync(this.checked)"> Auto-update every 5 s
                         </label>
                     </div>
                     <div class="table-container">
                         <table id="seen-table">
                             <thead>
-                                <tr><th>Source (GNS3 console)</th><th>Destination</th><th>Status</th><th>Replies</th><th>Min/Avg/Max (ms)</th></tr>
+                                <tr><th>Time</th><th>Source device</th><th>Destination</th><th>Status</th><th>Replies</th><th>Min/Avg/Max (ms)</th><th>Typed by</th></tr>
                             </thead>
-                            <tbody id="seen-body"><tr><td colspan="5" class="loading">Type a ping in a GNS3 device console, then click Sync from GNS3.</td></tr></tbody>
+                            <tbody id="seen-body"><tr><td colspan="7" class="loading">Select a GNS3 project. Then type a ping in any router or PC console in GNS3 and it appears here.</td></tr></tbody>
                         </table>
                     </div>
                 </div>

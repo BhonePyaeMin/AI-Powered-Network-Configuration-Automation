@@ -1448,6 +1448,7 @@ def _vpcs_ping(host: str, port: int, targets: list, count: int = 3) -> dict:
         sock.sendall(b"\r\n")
         read(1.0)
         for ip in targets:
+            _mark_web_ping(host, port, ip)
             sock.sendall(f"ping {ip} -c {count}\r\n".encode())
             out = read(count * 3 + 4, until_lines=count)
             results[ip] = [float(m) for m in
@@ -1455,6 +1456,21 @@ def _vpcs_ping(host: str, port: int, targets: list, count: int = 3) -> dict:
     finally:
         sock.close()
     return results
+
+
+_WEB_PINGS = {}
+_WEB_PINGS_LOCK = threading.Lock()
+
+
+def _mark_web_ping(host, port, ip):
+    with _WEB_PINGS_LOCK:
+        _WEB_PINGS[(host, port, ip)] = time.time()
+
+
+def _web_ping_recent(host, port, ip, within=180):
+    with _WEB_PINGS_LOCK:
+        t = _WEB_PINGS.get((host, port, ip))
+    return bool(t and time.time() - t <= within)
 
 
 def _ip_only(value):
@@ -1507,6 +1523,7 @@ def _ios_ping(host: str, port: int, targets: list, count: int = 4) -> dict:
         sock.sendall(b"end\r\n")
         _sock_read(sock, 0.8)
         for ip in targets:
+            _mark_web_ping(host, port, ip)
             sock.sendall(f"ping {ip} repeat {count}\r\n".encode())
             out = _sock_read(sock, count * 2 + 10, stop_pattern=r"Success rate is[^\n]*\n")
             m = re.search(r"Success rate is \d+ percent \((\d+)/(\d+)\)"
@@ -1662,6 +1679,7 @@ def run_single_ping(project_id: str, source: str, target: str, count: int = 4) -
         if not ip:
             return {"ok": False, "error": f"{dst} has no IP address yet."}
 
+    _mark_web_ping(host, port, ip)
     if inv["kind"][src] == "pc":
         cmd, gap = f"ping {ip} -c {count}", count * 3 + 3
         raw = _console_run(host, port, [cmd], gap=gap, tail=0.5, anchor=cmd, stop=rf"icmp_seq={count}\b")
@@ -1728,8 +1746,9 @@ def _parse_ping_history(text: str) -> list:
 
 def read_console_pings(project_id: str) -> dict:
     """
-    Latest ping result per (source device, destination IP) found in every router/PC console
-    history - this includes pings typed by hand in the GNS3 console.
+    Ping history of the GNS3 consoles: pings typed by hand in GNS3 (routers and PCs) and pings
+    run by the website. Live pings are captured by console_watch; each router's replayed console
+    history adds what happened before the watcher started.
     """
     topo = get_project_topology(project_id)
     if not topo.get("ok"):
@@ -1739,53 +1758,42 @@ def read_console_pings(project_id: str) -> dict:
         return nodes
     console_of = {n["name"]: (n.get("console_host", "127.0.0.1"), n.get("console"))
                   for n in nodes["nodes"] if n.get("status") == "started" and n.get("console")}
-    devs = [d for d in topo["_ai_topology"]["devices"] if d["type"] in ("router", "pc")]
+    devs = [d for d in topo["_ai_topology"]["devices"] if d["type"] in ("router", "pc") and d["id"] in console_of]
     ip_owner = {}
-    for d in devs:
+    for d in topo["_ai_topology"]["devices"]:
         for i in d["interfaces"]:
             ip = _ip_only(i.get("ip"))
             if ip:
                 ip_owner[ip] = d["id"]
 
-    latest, lock = {}, threading.Lock()
+    import console_watch
+    fresh = console_watch.ensure_watchers([(d["id"], console_of[d["id"]][0], console_of[d["id"]][1]) for d in devs])
+    if fresh:
+        time.sleep(3.5)  # new watchers need a moment to connect and read the replayed history
+    live, replayed = console_watch.snapshot([d["id"] for d in devs])
 
-    def worker(d):
-        host, port = console_of.get(d["id"], (None, None))
-        if not port:
-            return
-        try:
-            recs = _parse_ping_history(_console_history(host, port))
-        except Exception as e:
-            _log("WARN", f"Could not read console history of {d['id']}: {e}")
-            return
-        with lock:
-            for order, r in enumerate(recs):
-                latest[(d["id"], r["ip"])] = (order, r)
-
-    threads = [threading.Thread(target=worker, args=(d,)) for d in devs]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    rows = []
-    for (src, ip), (_, r) in latest.items():
+    def row(src, r, when, origin):
         rtts = r["rtts"]
-        if r["triple"]:                     # IOS already reports min/avg/max
+        if r.get("triple"):                 # IOS already reports min/avg/max
             lo, av, hi = rtts
         else:
             lo = min(rtts) if rtts else None
             av = sum(rtts) / len(rtts) if rtts else None
             hi = max(rtts) if rtts else None
-        rows.append({"source": src, "dest_ip": ip, "dest": ip_owner.get(ip, ""),
-                     "replies": r["replies"], "sent": r["sent"],
-                     "status": "SUCCESS" if r["replies"] else "FAIL",
-                     "min": round(lo, 1) if lo is not None else None,
-                     "avg": round(av, 1) if av is not None else None,
-                     "max": round(hi, 1) if hi is not None else None})
-    rows.sort(key=lambda r: (_natural_key(r["source"]), _natural_key(r["dest_ip"])))
-    return {"ok": True, "results": rows}
+        return {"time": when, "source": src, "dest_ip": r["ip"], "dest": ip_owner.get(r["ip"], ""),
+                "replies": r["replies"], "sent": r["sent"], "origin": origin,
+                "status": "SUCCESS" if r["replies"] else "FAIL",
+                "min": round(lo, 1) if lo is not None else None,
+                "avg": round(av, 1) if av is not None else None,
+                "max": round(hi, 1) if hi is not None else None}
 
+    rows = [row(e["source"], e, e["time"], e["origin"]) for e in live[:40]]
+    earlier = []
+    for src, per_ip in replayed.items():
+        for ip, r in per_ip.items():
+            earlier.append(row(src, r, "earlier", "Console history"))
+    earlier.sort(key=lambda r: (_natural_key(r["source"]), _natural_key(r["dest_ip"])))
+    return {"ok": True, "results": rows + earlier, "live": len(rows)}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTOMATION REPORT (PRD FR-6)
