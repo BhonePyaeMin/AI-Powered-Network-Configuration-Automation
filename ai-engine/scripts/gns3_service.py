@@ -1604,18 +1604,25 @@ def run_ping_matrix(project_id: str, count: int = 3) -> dict:
         else:
             res = _ios_ping(host, port, ips, count + 1)
         for dst, ip in pairs:
-            replies, sent, rtts = 0, count, []
+            replies, sent, rtts, triple = 0, count, [], False
             if ip and "error" not in res:
                 r = res.get(ip)
-                if isinstance(r, dict):
+                if isinstance(r, dict):          # router: IOS reports min/avg/max itself
                     replies, sent, rtts = r["replies"], r["sent"], r["rtt"]
+                    triple = bool(rtts)
                 elif isinstance(r, list):
                     replies, rtts = len(r), r
+            if triple:
+                lo, av, hi = rtts
+            else:
+                lo = min(rtts) if rtts else None
+                av = sum(rtts) / len(rtts) if rtts else None
+                hi = max(rtts) if rtts else None
             row = {"source": src, "dest": dst, "dest_ip": ip or "no IP", "replies": replies, "sent": sent,
                    "status": "SUCCESS" if replies else "FAIL",
-                   "min": round(min(rtts), 1) if rtts else None,
-                   "avg": round(sum(rtts) / len(rtts), 1) if rtts else None,
-                   "max": round(max(rtts), 1) if rtts else None}
+                   "min": round(lo, 1) if lo is not None else None,
+                   "avg": round(av, 1) if av is not None else None,
+                   "max": round(hi, 1) if hi is not None else None}
             with lock:
                 out.append(row)
 
@@ -1668,6 +1675,117 @@ def run_single_ping(project_id: str, source: str, target: str, count: int = 4) -
     _log("OK" if replies else "WARN", f"Manual ping {src} -> {label}: {replies}/{count} replies")
     return {"ok": True, "source": src, "target": label, "target_ip": ip, "output": raw,
             "replies": replies, "sent": count, "status": "SUCCESS" if replies else "FAIL"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PINGS TYPED IN THE GNS3 CONSOLES (read back from each device's console history)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PROMPT_LINE = re.compile(r"^[A-Za-z0-9_\-\.]+(?:\([A-Za-z0-9\-]+\))?[#>]")
+
+
+def _console_history(host: str, port: int, wait: float = 3.0) -> str:
+    """Everything the device console replays when a new Telnet client connects."""
+    sock = socket.create_connection((host, port), timeout=8)
+    try:
+        sock.sendall(b"\r\n")
+        return _sock_read(sock, wait).replace("\r", "")
+    finally:
+        sock.close()
+
+
+def _parse_ping_history(text: str) -> list:
+    """Find `ping <ip>` commands and their results in console text (IOS router or VPCS)."""
+    lines = text.split("\n")
+    found, i = [], 0
+    while i < len(lines):
+        m = re.search(r"[#>]\s*ping\s+(\d+\.\d+\.\d+\.\d+)", lines[i])
+        if not m:
+            i += 1
+            continue
+        ip, replies, sent, rtts, triple, j = m.group(1), 0, 0, [], False, i + 1
+        while j < len(lines) and j <= i + 60 and not _PROMPT_LINE.match(lines[j].strip()):
+            ln = lines[j]
+            sr = re.search(r"Success rate is \d+ percent \((\d+)/(\d+)\)"
+                           r"(?:, round-trip min/avg/max = (\d+)/(\d+)/(\d+) ms)?", ln)
+            if sr:  # IOS router
+                replies, sent = int(sr.group(1)), int(sr.group(2))
+                rtts = [float(sr.group(k)) for k in (3, 4, 5)] if sr.group(3) else []
+                triple = bool(rtts)
+                break
+            if "icmp_seq=" in ln:  # VPCS
+                sent += 1
+                t = re.search(r"time=([\d.]+) ms", ln)
+                if "bytes from" in ln and t:
+                    replies += 1
+                    rtts.append(float(t.group(1)))
+            j += 1
+        if sent:
+            found.append({"ip": ip, "replies": replies, "sent": sent, "rtts": rtts, "triple": triple})
+        i = max(j, i + 1)
+    return found
+
+
+def read_console_pings(project_id: str) -> dict:
+    """
+    Latest ping result per (source device, destination IP) found in every router/PC console
+    history - this includes pings typed by hand in the GNS3 console.
+    """
+    topo = get_project_topology(project_id)
+    if not topo.get("ok"):
+        return topo
+    nodes = get_project_nodes(project_id)
+    if not nodes.get("ok"):
+        return nodes
+    console_of = {n["name"]: (n.get("console_host", "127.0.0.1"), n.get("console"))
+                  for n in nodes["nodes"] if n.get("status") == "started" and n.get("console")}
+    devs = [d for d in topo["_ai_topology"]["devices"] if d["type"] in ("router", "pc")]
+    ip_owner = {}
+    for d in devs:
+        for i in d["interfaces"]:
+            ip = _ip_only(i.get("ip"))
+            if ip:
+                ip_owner[ip] = d["id"]
+
+    latest, lock = {}, threading.Lock()
+
+    def worker(d):
+        host, port = console_of.get(d["id"], (None, None))
+        if not port:
+            return
+        try:
+            recs = _parse_ping_history(_console_history(host, port))
+        except Exception as e:
+            _log("WARN", f"Could not read console history of {d['id']}: {e}")
+            return
+        with lock:
+            for order, r in enumerate(recs):
+                latest[(d["id"], r["ip"])] = (order, r)
+
+    threads = [threading.Thread(target=worker, args=(d,)) for d in devs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    rows = []
+    for (src, ip), (_, r) in latest.items():
+        rtts = r["rtts"]
+        if r["triple"]:                     # IOS already reports min/avg/max
+            lo, av, hi = rtts
+        else:
+            lo = min(rtts) if rtts else None
+            av = sum(rtts) / len(rtts) if rtts else None
+            hi = max(rtts) if rtts else None
+        rows.append({"source": src, "dest_ip": ip, "dest": ip_owner.get(ip, ""),
+                     "replies": r["replies"], "sent": r["sent"],
+                     "status": "SUCCESS" if r["replies"] else "FAIL",
+                     "min": round(lo, 1) if lo is not None else None,
+                     "avg": round(av, 1) if av is not None else None,
+                     "max": round(hi, 1) if hi is not None else None})
+    rows.sort(key=lambda r: (_natural_key(r["source"]), _natural_key(r["dest_ip"])))
+    return {"ok": True, "results": rows}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTOMATION REPORT (PRD FR-6)

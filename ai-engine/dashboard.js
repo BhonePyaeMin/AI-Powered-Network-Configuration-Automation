@@ -2073,6 +2073,56 @@ async function gns3LoadLiveTopology(projectId) {
     }
 }
 
+// ── Pings typed in the GNS3 consoles -> shown on the website ──────────────────
+let gns3AutoSyncTimer = null;
+
+async function gns3SyncConsolePings(silent) {
+    if (!gns3ProjectId) {
+        if (!silent) showToast('fail', 'No Project', 'Select a GNS3 project first.');
+        return;
+    }
+    const body = document.getElementById('seen-body');
+    const btn  = document.getElementById('btn-sync-pings');
+    if (btn && !silent) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> Reading consoles…'; lucide.createIcons({nodes:[btn]}); }
+    try {
+        const r = await fetch(`/gns3-api/projects/${gns3ProjectId}/console-pings`);
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || 'Sync failed');
+        const rows = j.results || [];
+        const fmt = v => (v === null || v === undefined) ? '—' : v;
+        if (body) {
+            body.innerHTML = rows.length ? rows.map(p => `
+                <tr>
+                    <td class="ping-source"><i data-lucide="terminal" class="table-icon"></i> ${escHtml(p.source)}</td>
+                    <td class="ping-dest">${escHtml(p.dest_ip)}${p.dest ? ' (' + escHtml(p.dest) + ')' : ''}</td>
+                    <td><span class="status-pill ${p.status==='SUCCESS'?'status-success':'status-fail'}">
+                        <span class="status-dot-inner"></span>${p.status}</span></td>
+                    <td class="metrics">${p.replies}/${p.sent}</td>
+                    <td class="metrics">${p.status==='SUCCESS' ? `${fmt(p.min)}/${fmt(p.avg)}/${fmt(p.max)}` : '—'}</td>
+                </tr>`).join('')
+                : '<tr><td colspan="5" class="loading">No pings found in the console history yet. Run a ping in GNS3, then sync again.</td></tr>';
+            lucide.createIcons({ nodes: [body] });
+        }
+        if (!silent) {
+            const ok = rows.filter(p => p.status === 'SUCCESS').length;
+            gns3Log('OK', `Synced ${rows.length} ping result(s) from the GNS3 consoles (${ok} successful)`);
+            showToast('success', 'Synced from GNS3', `${rows.length} ping result(s) read from the device consoles.`);
+        }
+    } catch (e) {
+        if (!silent) showToast('fail', 'Sync Failed', e.message);
+    } finally {
+        if (btn && !silent) { btn.disabled = false; btn.innerHTML = '<i data-lucide="download"></i> Sync from GNS3'; lucide.createIcons({nodes:[btn]}); }
+    }
+}
+
+function gns3ToggleAutoSync(on) {
+    if (gns3AutoSyncTimer) { clearInterval(gns3AutoSyncTimer); gns3AutoSyncTimer = null; }
+    if (on) {
+        gns3SyncConsolePings(true);
+        gns3AutoSyncTimer = setInterval(() => gns3SyncConsolePings(true), 10000);
+    }
+}
+
 // ── Manual ping from any router / PC (same output as the GNS3 console) ─────────
 async function gns3ManualPing() {
     const src = document.getElementById('mp-src').value.trim();
