@@ -28,7 +28,8 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
-      - ${BACKEND_ENV_FILE:-./backend-node/.env.local}
+      - path: ${BACKEND_ENV_FILE:-./backend-node/.env.local}
+        required: false
     environment:
       NODE_ENV: ${BACKEND_NODE_ENV:-development}
       PORT: 8082

@@ -118,7 +118,7 @@ python configure.py
 python start_dashboard.py
 ```
 
-Opens `http://localhost:8000/dashboard.html` in your browser.
+Opens `http://localhost:8001/dashboard.html` in your browser.
 
 Dashboard features:
 - **View** topology files (`.gns3`)
