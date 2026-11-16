@@ -79,6 +79,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self._json(400, {"ok": False, "error": "Invalid path"})
 
+        # ── GNS3 API: Pings typed in the GNS3 consoles ────────────────────────
+        elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/console-pings'):
+            parts = self.path.split('/')
+            if len(parts) == 5:
+                self._handle_gns3_console_pings(parts[3])
+            else:
+                self._json(400, {"ok": False, "error": "Invalid path"})
+
         # ── GNS3 API: Real topology of a project (devices, switches, links) ───
         elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/topology'):
             parts = self.path.split('/')
@@ -338,6 +346,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             data = json.loads(self.rfile.read(length) or b'{}')
             from gns3_service import run_single_ping
             self._json(200, run_single_ping(project_id, data.get('source', ''), data.get('target', '')))
+        except Exception as e:
+            self._json(500, {"ok": False, "error": str(e)})
+
+    def _handle_gns3_console_pings(self, project_id: str):
+        try:
+            from gns3_service import read_console_pings
+            self._json(200, read_console_pings(project_id))
         except Exception as e:
             self._json(500, {"ok": False, "error": str(e)})
 
