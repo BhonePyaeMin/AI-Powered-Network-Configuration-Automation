@@ -77,6 +77,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self._json(400, {"ok": False, "error": "Invalid path"})
 
+        # ── GNS3 API: Real topology of a project (devices, switches, links) ───
+        elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/topology'):
+            parts = self.path.split('/')
+            if len(parts) == 5:
+                self._handle_gns3_topology(parts[3])
+            else:
+                self._json(400, {"ok": False, "error": "Invalid path"})
+
         # ── GNS3 API: Live IPs for a project ──────────────────────────────────
         elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/live-ips'):
             parts = self.path.split('/')
@@ -210,6 +218,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self._json(400, {"ok": False, "error": "Invalid path"})
 
+        # ── GNS3 API: Real ping test between PCs ──────────────────────────────
+        elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/ping-matrix'):
+            parts = self.path.split('/')
+            if len(parts) == 5:
+                self._handle_gns3_ping_matrix(parts[3])
+            else:
+                self._json(400, {"ok": False, "error": "Invalid path"})
+
         # ── GNS3 API: Config preview ──────────────────────────────────────────
         elif self.path == '/gns3-api/config-preview':
             self._handle_gns3_config_preview()
@@ -254,6 +270,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             from gns3_service import get_project_nodes
             result = get_project_nodes(project_id)
             self._json(200, result)
+        except Exception as e:
+            self._json(500, {"ok": False, "error": str(e)})
+
+    def _handle_gns3_topology(self, project_id: str):
+        try:
+            from gns3_service import get_project_topology
+            self._json(200, get_project_topology(project_id))
+        except Exception as e:
+            self._json(500, {"ok": False, "error": str(e)})
+
+    def _handle_gns3_ping_matrix(self, project_id: str):
+        try:
+            from gns3_service import run_ping_matrix
+            self._json(200, run_ping_matrix(project_id))
         except Exception as e:
             self._json(500, {"ok": False, "error": str(e)})
 

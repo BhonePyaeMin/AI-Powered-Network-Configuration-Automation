@@ -1185,3 +1185,283 @@ def get_live_ips(project_id: str) -> dict:
 
     _log("OK", f"Live IPs fetched: {live_ips}")
     return {"ok": True, "live_ips": live_ips}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE TOPOLOGY IMPORT (reads the real GNS3 project: nodes, switches, links)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _node_kind(node_type: str) -> str:
+    t = (node_type or "").lower()
+    if t == "vpcs":
+        return "pc"
+    if "switch" in t or t == "ethernet_hub":
+        return "switch"
+    if t in ("cloud", "nat"):
+        return "cloud"
+    return "router"
+
+
+def _port_short_name(node: dict, adapter: int, port: int) -> str:
+    for p in node.get("ports", []):
+        if p.get("adapter_number") == adapter and p.get("port_number") == port:
+            return p.get("short_name") or p.get("name") or f"{adapter}/{port}"
+    return f"{adapter}/{port}"
+
+
+def _trailing_number(name: str):
+    m = re.search(r"(\d+)\s*$", name or "")
+    return int(m.group(1)) if m else None
+
+
+def _natural_key(name: str):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name or "")]
+
+
+def _plan_addressing(devices: list, connections: list, node_kind: dict) -> list:
+    """
+    Group device ports into layer-2 segments (switches/hubs are transparent) and
+    give each segment a subnet. Fills interface IPs/gateways in `devices` in place.
+    Returns the list of subnets used.
+    """
+    by_name = {d["id"]: d for d in devices}
+    switches = [n for n, k in node_kind.items() if k == "switch"]
+    parent = {s: s for s in switches}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for c in connections:
+        a, b = c["from_device"], c["to_device"]
+        if node_kind.get(a) == "switch" and node_kind.get(b) == "switch":
+            parent[find(a)] = find(b)
+
+    segments = {}  # key -> list of (device, iface)
+    for i, c in enumerate(connections):
+        a, b = c["from_device"], c["to_device"]
+        ends = [(a, c["from_interface"]), (b, c["to_interface"])]
+        sw = [e for e in ends if node_kind.get(e[0]) == "switch"]
+        key = ("sw", find(sw[0][0])) if sw else ("p2p", i)
+        for dev, iface in ends:
+            if node_kind.get(dev) in ("router", "pc"):
+                segments.setdefault(key, []).append((dev, iface))
+
+    used_third = set()
+    counter = {"lan": 100, "p2p": 100}
+    subnets = []
+
+    def pick(third, kind):
+        if third is None or third > 255 or (kind, third) in used_third:
+            third = counter[kind]
+            while (kind, third) in used_third:
+                third += 1
+            counter[kind] = third + 1
+        used_third.add((kind, third))
+        return third
+
+    def seg_order(kv):
+        rs = [_natural_key(d) for d, _ in kv[1] if node_kind.get(d) == "router"]
+        return min(rs) if rs else [chr(0x10ffff)]
+
+    for key, members in sorted(segments.items(), key=seg_order):
+        routers = sorted({d for d, _ in members if node_kind[d] == "router"}, key=_natural_key)
+        pcs = sorted({d for d, _ in members if node_kind[d] == "pc"}, key=_natural_key)
+        iface_of = {d: i for d, i in members}
+
+        if len(routers) == 2 and not pcs:
+            nums = [_trailing_number(r) for r in routers]
+            third = int("".join(str(n) for n in nums)) if all(n is not None for n in nums) else None
+            third = pick(third, "p2p")
+            base, plen = f"10.0.{third}.", 30
+            hosts = [(r, i + 1) for i, r in enumerate(routers)]
+            gateway = None
+        else:
+            first = _trailing_number(routers[0]) if routers else None
+            third = pick(first * 10 if first is not None else None, "lan")
+            base, plen = f"192.168.{third}.", 24
+            hosts = [(d, i + 1) for i, d in enumerate(routers + pcs)]
+            gateway = f"{base}1" if routers else None
+
+        for dev, host in hosts:
+            for ifc in by_name[dev]["interfaces"]:
+                if ifc["name"] == iface_of[dev]:
+                    ifc["ip"] = f"{base}{host}/{plen}"
+                    if node_kind[dev] == "pc" and gateway:
+                        ifc["gateway"] = gateway
+        subnets.append({"network": f"{base}0/{plen}",
+                        "label": ("Link " if plen == 30 else "LAN ") + "/".join(routers or pcs)})
+    return subnets
+
+
+def get_project_topology(project_id: str) -> dict:
+    """
+    Read the real topology of a GNS3 project (devices incl. switches, links with port
+    names, positions) and build the dashboard's .gns3-style topology plus an
+    `_ai_topology` with a generated IP plan, so the website matches GNS3.
+    """
+    try:
+        proj = _get(f"projects/{project_id}")
+        raw_nodes = _get(f"projects/{project_id}/nodes")
+        raw_links = _get(f"projects/{project_id}/links")
+    except Exception as e:
+        msg = f"Failed to read topology of project {project_id}: {e}"
+        _log("ERROR", msg)
+        return {"ok": False, "error": msg}
+
+    by_id = {n["node_id"]: n for n in raw_nodes}
+    node_kind = {n["name"]: _node_kind(n.get("node_type")) for n in raw_nodes}
+
+    devices = []
+    for n in raw_nodes:
+        devices.append({
+            "id": n["name"], "label": n["name"], "type": node_kind[n["name"]], "vendor": "cisco",
+            "x": n.get("x", 0), "y": n.get("y", 0), "interfaces": [],
+        })
+    dev_by_name = {d["id"]: d for d in devices}
+
+    topo_links, connections = [], []
+    for lk in raw_links:
+        ends = lk.get("nodes", [])
+        if len(ends) != 2 or any(e["node_id"] not in by_id for e in ends):
+            continue
+        sides = []
+        for e in ends:
+            node = by_id[e["node_id"]]
+            short = _port_short_name(node, e.get("adapter_number", 0), e.get("port_number", 0))
+            if node_kind[node["name"]] == "pc":
+                short = "eth0"
+            sides.append((node["name"], short, e))
+        topo_links.append({
+            "link_id": lk["link_id"],
+            "nodes": [{"node_id": e["node_id"], "adapter_number": e.get("adapter_number", 0),
+                       "port_number": e.get("port_number", 0), "label": {"text": short}}
+                      for _, short, e in sides],
+        })
+        connections.append({"from_device": sides[0][0], "from_interface": sides[0][1],
+                            "to_device": sides[1][0], "to_interface": sides[1][1],
+                            "link_type": "ethernet"})
+        for name, short, _ in sides:
+            if node_kind[name] in ("router", "pc"):
+                dev_by_name[name]["interfaces"].append({"name": short, "ip": ""})
+
+    subnets = _plan_addressing(devices, connections, node_kind)
+
+    topo_nodes = [{
+        "node_id": n["node_id"], "name": n["name"], "node_type": n.get("node_type", ""),
+        "x": n.get("x", 0), "y": n.get("y", 0), "properties": {},
+    } for n in raw_nodes]
+
+    _log("OK", f"Imported topology of '{proj.get('name')}': {len(topo_nodes)} devices, "
+               f"{len(topo_links)} links, {len(subnets)} subnets")
+    return {
+        "ok": True,
+        "source": "gns3-live",
+        "name": proj.get("name", ""),
+        "topology": {"nodes": topo_nodes, "links": topo_links, "drawings": []},
+        "_ai_topology": {"devices": devices, "connections": connections, "subnets": subnets},
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REAL PING TEST (VPCS consoles)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _vpcs_ping(host: str, port: int, targets: list, count: int = 3) -> dict:
+    """Run `ping <ip> -c N` on a VPCS console for each target. Returns {ip: [rtt_ms, ...]}."""
+    results = {}
+    try:
+        sock = socket.create_connection((host, port), timeout=8)
+    except Exception as e:
+        return {"error": f"console {host}:{port}: {e}"}
+
+    def read(wait, until_lines=None):
+        buf, end = b"", time.time() + wait
+        while time.time() < end:
+            try:
+                sock.settimeout(0.25)
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                i, clean = 0, bytearray()
+                while i < len(chunk):
+                    if chunk[i] == 255 and i + 2 < len(chunk):
+                        if chunk[i + 1] in (253, 251):
+                            sock.sendall(bytes([255, 252 if chunk[i + 1] == 253 else 254, chunk[i + 2]]))
+                        i += 3
+                    else:
+                        clean.append(chunk[i])
+                        i += 1
+                buf += bytes(clean)
+                if until_lines and buf.decode("ascii", "replace").count("icmp_seq") >= until_lines:
+                    time.sleep(0.3)
+                    break
+            except socket.timeout:
+                pass
+            except Exception:
+                break
+        return buf.decode("ascii", "replace")
+
+    try:
+        sock.sendall(b"\r\n")
+        read(1.0)
+        for ip in targets:
+            sock.sendall(f"ping {ip} -c {count}\r\n".encode())
+            out = read(count * 3 + 4, until_lines=count)
+            results[ip] = [float(m) for m in
+                           re.findall(r"bytes from \S+ icmp_seq=\d+ ttl=\d+ time=([\d.]+) ms", out)]
+    finally:
+        sock.close()
+    return results
+
+
+def run_ping_matrix(project_id: str, count: int = 3) -> dict:
+    """Ping every PC from every other PC in the project and return real results."""
+    topo = get_project_topology(project_id)
+    if not topo.get("ok"):
+        return topo
+    nodes = get_project_nodes(project_id)
+    if not nodes.get("ok"):
+        return nodes
+    console_of = {n["name"]: (n.get("console_host", "127.0.0.1"), n.get("console")) for n in nodes["nodes"]}
+
+    ips = {}
+    for d in topo["_ai_topology"]["devices"]:
+        if d["type"] == "pc" and d["interfaces"] and d["interfaces"][0].get("ip"):
+            ips[d["id"]] = d["interfaces"][0]["ip"].split("/")[0]
+    try:
+        live = get_live_ips(project_id)
+        for name, ip in (live.get("live_ips") or {}).items():
+            if name in ips and ip and ip != "0.0.0.0":
+                ips[name] = ip.split("/")[0]
+    except Exception:
+        pass
+
+    pcs = sorted(ips, key=_natural_key)
+    out, lock = [], threading.Lock()
+
+    def worker(src):
+        host, port = console_of.get(src, (None, None))
+        dsts = [d for d in pcs if d != src]
+        res = _vpcs_ping(host, port, [ips[d] for d in dsts], count) if port else {"error": "no console"}
+        for d in dsts:
+            rtts = res.get(ips[d], []) if "error" not in res else []
+            row = {"source": src, "dest": d, "dest_ip": ips[d], "replies": len(rtts), "sent": count,
+                   "status": "SUCCESS" if rtts else "FAIL",
+                   "min": round(min(rtts), 1) if rtts else None,
+                   "avg": round(sum(rtts) / len(rtts), 1) if rtts else None,
+                   "max": round(max(rtts), 1) if rtts else None}
+            with lock:
+                out.append(row)
+
+    threads = [threading.Thread(target=worker, args=(s,)) for s in pcs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    out.sort(key=lambda r: (_natural_key(r["source"]), _natural_key(r["dest"])))
+    ok = sum(r["status"] == "SUCCESS" for r in out)
+    _log("OK" if ok == len(out) else "WARN", f"Ping test: {ok}/{len(out)} paths reachable")
+    return {"ok": True, "results": out}
