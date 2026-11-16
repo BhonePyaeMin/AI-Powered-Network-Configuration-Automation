@@ -77,10 +77,16 @@ async function fetchLiveIPs() {
 
 // Helper to generate a predictable IP from a device name
 function getIP(name) {
+    const isIPv4 = s => /^\d{1,3}(\.\d{1,3}){3}/.test(String(s || ''));
+    const tested = window._deviceIPs && window._deviceIPs[name];       // read from the devices by the last ping test
+    if (tested && tested.length) return tested.map(x => String(x).split('/')[0]).join(', ');
+    const plan = window._ipPlan && window._ipPlan[name];               // addresses the automation configures
+    const live = window.liveIPs && window.liveIPs[name];
+    if (isIPv4(live) && !(plan && plan.length > 1)) return String(live).split('/')[0];
+    if (plan && plan.length) return plan.map(p => p.ip.split('/')[0]).join(', ');
     if (window.liveIPs && window.liveIPs.hasOwnProperty(name)) {
-        const ip = window.liveIPs[name];
-        if (!ip || ip === "unassigned") return "No IP";
-        return ip.split('/')[0];
+        if (!isIPv4(live)) return "No IP";
+        return String(live).split('/')[0];
     }
     
     const ln = name.toLowerCase();
@@ -107,6 +113,11 @@ async function fetchTopology() {
 }
 
 function parseAndRender(data) {
+    window._ipPlan = {};
+    ((data._ai_topology && data._ai_topology.devices) || []).forEach(d => {
+        const ips = (d.interfaces || []).filter(i => i.ip).map(i => ({ name: i.name, ip: i.ip }));
+        if (ips.length) window._ipPlan[d.id || d.label] = ips;
+    });
     const rawNodes = data.topology.nodes || [];
     const rawLinks = data.topology.links || [];
     const drawings = data.topology.drawings || [];
@@ -210,6 +221,7 @@ function renderDashboard(ts, pcs, routers, links, drawings, pings) {
             </div>
             <div class="device-details">
                 <div class="device-name">${dev.name}</div>
+                <div class="device-meta device-ip">IP: ${getIP(dev.name)}</div>
                 <div class="device-meta">Coord: (${dev.x}, ${dev.y})</div>
             </div>
             <div class="status-pill ${dev.status==='SUCCESS'?'status-success':'status-fail'}">
@@ -236,6 +248,9 @@ function renderDashboard(ts, pcs, routers, links, drawings, pings) {
     document.getElementById('ping-body').innerHTML =
         pings.length ? pings.map(mkRow).join('') : '<tr><td colspan="4" class="loading">No Ping Data...</td></tr>';
 
+    const mpList = document.getElementById('mp-devices');
+    if (mpList) mpList.innerHTML = allNodes.filter(n => n.type !== 'Switch')
+        .map(n => `<option value="${n.name}"></option>`).join('');
     renderTopologyGraph(allNodes, links, drawings);
     lucide.createIcons();
 }
@@ -2058,6 +2073,36 @@ async function gns3LoadLiveTopology(projectId) {
     }
 }
 
+// ── Manual ping from any router / PC (same output as the GNS3 console) ─────────
+async function gns3ManualPing() {
+    const src = document.getElementById('mp-src').value.trim();
+    const dst = document.getElementById('mp-dst').value.trim();
+    const out = document.getElementById('mp-output');
+    const btn = document.getElementById('btn-manual-ping');
+    if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
+    if (!src || !dst) { showToast('fail', 'Missing Input', 'Enter the source device and the destination (IP or device).'); return; }
+    out.style.display = 'block';
+    out.textContent = `Pinging from ${src} to ${dst} …`;
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> Pinging…'; lucide.createIcons({nodes:[btn]}); }
+    try {
+        const r = await fetch(`/gns3-api/projects/${gns3ProjectId}/ping`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ source: src, target: dst })
+        });
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || 'Ping failed');
+        out.textContent = `${j.source} -> ${j.target}: ${j.status} (${j.replies}/${j.sent} replies)\n` +
+                          `---------------------------------------------\n${j.output}`;
+        out.className = 'mp-out ' + (j.status === 'SUCCESS' ? 'mp-ok' : 'mp-fail');
+        gns3Log(j.status === 'SUCCESS' ? 'OK' : 'WARN', `Ping ${j.source} -> ${j.target}: ${j.replies}/${j.sent} replies`);
+    } catch (e) {
+        out.textContent = e.message;
+        out.className = 'mp-out mp-fail';
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="send"></i> Ping'; lucide.createIcons({nodes:[btn]}); }
+    }
+}
+
 // ── Automation report (download + saved in results/) ─────────────────────────
 async function gns3GenerateReport() {
     if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
@@ -2090,8 +2135,8 @@ async function gns3RunPingTest() {
     const body = document.getElementById('ping-body');
     const btn  = document.getElementById('btn-run-ping');
     if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> Pinging…'; lucide.createIcons({nodes:[btn]}); }
-    if (body) body.innerHTML = '<tr><td colspan="4" class="loading">Running real pings from each PC…</td></tr>';
-    gns3Log('INFO', 'Running real ping tests between all PCs…');
+    if (body) body.innerHTML = '<tr><td colspan="4" class="loading">Running real pings from every router and PC…</td></tr>';
+    gns3Log('INFO', 'Running real ping tests between all routers and PCs…');
 
     try {
         const r = await fetch(`/gns3-api/projects/${gns3ProjectId}/ping-matrix`, { method: 'POST' });
@@ -2112,6 +2157,11 @@ async function gns3RunPingTest() {
                 : '<tr><td colspan="4" class="loading">No PCs with an IP address found...</td></tr>';
             lucide.createIcons({ nodes: [body] });
         }
+        window._deviceIPs = j.device_ips || {};
+        Object.values(nodeRegistry).forEach(n => {
+            const el = document.querySelector(`#card-${n.id} .device-ip`);
+            if (el) el.textContent = `IP: ${getIP(n.name)}`;
+        });
         const ok = rows.filter(p => p.status === 'SUCCESS').length;
         const totalEl = document.getElementById('total-pings');
         const okEl    = document.getElementById('success-pings');

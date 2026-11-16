@@ -183,6 +183,19 @@
                         <tbody id="ping-body"></tbody>
                     </table>
                 </div>
+                <div class="manual-ping">
+                    <div class="manual-ping-title"><i data-lucide="terminal"></i> Ping from a device (same result as the GNS3 console)</div>
+                    <div class="manual-ping-row">
+                        <input id="mp-src" class="mp-input" list="mp-devices" placeholder="From device, e.g. R1" autocomplete="off">
+                        <input id="mp-dst" class="mp-input" list="mp-devices" placeholder="To IP or device, e.g. 10.0.12.2 or R2" autocomplete="off">
+                        <datalist id="mp-devices"></datalist>
+                        <button class="control-btn" id="btn-manual-ping" onclick="gns3ManualPing()"
+                                style="border-color: rgba(59,130,246,.4); color:#60a5fa;">
+                            <i data-lucide="send"></i> Ping
+                        </button>
+                    </div>
+                    <pre id="mp-output" class="mp-out" style="display:none;"></pre>
+                </div>
             </section>
 
             <!-- ═══════════════════════════════════════════════════════════════

@@ -242,6 +242,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self._json(400, {"ok": False, "error": "Invalid path"})
 
+        # ── GNS3 API: Ping from one device to an IP / device ──────────────────
+        elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/ping'):
+            parts = self.path.split('/')
+            if len(parts) == 5:
+                self._handle_gns3_ping(parts[3])
+            else:
+                self._json(400, {"ok": False, "error": "Invalid path"})
+
         # ── GNS3 API: Automation report (FR-6) ────────────────────────────────
         elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/report'):
             parts = self.path.split('/')
@@ -322,6 +330,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             import traceback
             traceback.print_exc()
+            self._json(500, {"ok": False, "error": str(e)})
+
+    def _handle_gns3_ping(self, project_id: str):
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length) or b'{}')
+            from gns3_service import run_single_ping
+            self._json(200, run_single_ping(project_id, data.get('source', ''), data.get('target', '')))
+        except Exception as e:
             self._json(500, {"ok": False, "error": str(e)})
 
     def _handle_gns3_report(self, project_id: str):
