@@ -226,6 +226,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self._json(400, {"ok": False, "error": "Invalid path"})
 
+        # ── GNS3 API: Automation report (FR-6) ────────────────────────────────
+        elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/report'):
+            parts = self.path.split('/')
+            if len(parts) == 5:
+                self._handle_gns3_report(parts[3])
+            else:
+                self._json(400, {"ok": False, "error": "Invalid path"})
+
         # ── GNS3 API: Config preview ──────────────────────────────────────────
         elif self.path == '/gns3-api/config-preview':
             self._handle_gns3_config_preview()
@@ -287,6 +295,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._json(500, {"ok": False, "error": str(e)})
 
+    def _handle_gns3_report(self, project_id: str):
+        try:
+            from gns3_service import build_report
+            self._json(200, build_report(project_id))
+        except Exception as e:
+            self._json(500, {"ok": False, "error": str(e)})
+
     def _handle_gns3_live_ips(self, project_id: str):
         try:
             from gns3_service import get_live_ips
@@ -313,7 +328,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": "No AI devices provided"})
                 return
             from gns3_service import build_config_preview
-            result = build_config_preview(ai_devices)
+            result = build_config_preview(ai_devices, data.get('connections', []))
             self._json(200, result)
         except Exception as e:
             self._json(500, {"ok": False, "error": str(e)})
