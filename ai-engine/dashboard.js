@@ -2242,6 +2242,13 @@ function gns3TogglePreview() {
 }
 
 // ── Apply configuration ───────────────────────────────────────────────────────
+function gns3SetProgressTitle(icon, text) {
+    const el = document.getElementById('gns3-progress-title');
+    if (!el) return;
+    el.innerHTML = `<i data-lucide="${icon}"></i> ${text}`;
+    lucide.createIcons({ nodes: [el] });
+}
+
 async function gns3ApplyConfig() {
     if (gns3Busy) return;
     if (!gns3Connected) {
@@ -2279,6 +2286,7 @@ async function gns3ApplyConfig() {
     const verifyBtn    = document.getElementById('btn-gns3-verify');
 
     if (progressCard) progressCard.style.display = '';
+    gns3SetProgressTitle('loader', 'Applying Configuration…');
     if (applyBtn) { applyBtn.disabled = true; applyBtn.innerHTML = '<i data-lucide="loader"></i> Applying…'; lucide.createIcons({nodes:[applyBtn]}); }
 
     // Build initial progress rows
@@ -2331,7 +2339,7 @@ async function gns3ApplyConfig() {
                     gns3Log('OK', `${device}: Configuration applied successfully`);
                 } else if (status === 'skipped') {
                     setProgress(device, '—', 'Skipped', 'gns3-prog-skipped');
-                    gns3Log('WARN', `${device}: ${result.output || 'Skipped'}`);
+                    gns3Log('INFO', `${device}: ${result.output || 'Skipped'}`);
                 } else {
                     setProgress(device, '✗', 'Error', 'gns3-prog-error');
                     gns3Log('ERROR', `${device}: ${result.error}`);
@@ -2340,16 +2348,19 @@ async function gns3ApplyConfig() {
         }
 
         if (j.ok) {
+            gns3SetProgressTitle('check-circle', 'Configuration Applied');
             showToast('success', 'Configuration Applied!', 'All devices configured successfully.');
             gns3Log('OK', 'Configuration apply workflow complete ✓');
             if (verifyBtn) verifyBtn.style.display = '';
             gns3RunPingTest();
         } else {
+            gns3SetProgressTitle('alert-triangle', 'Apply Finished With Errors');
             showToast('fail', 'Apply Partially Failed', 'Some devices had errors. Check the log.');
             gns3Log('WARN', 'Apply finished with errors — check log for details');
             if (verifyBtn) verifyBtn.style.display = '';
         }
     } catch (e) {
+        gns3SetProgressTitle('x-circle', 'Apply Failed');
         showToast('fail', 'Apply Failed', e.message);
         gns3Log('ERROR', `Apply request failed: ${e.message}`);
     } finally {

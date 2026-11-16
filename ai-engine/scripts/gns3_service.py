@@ -905,10 +905,10 @@ def apply_configuration(project_id: str, device_mapping: list[dict],
             connections=connections
         )
         if not commands:
-            _log("WARN", f"{gns3_name}: No commands generated — skipping")
+            _log("INFO", f"{gns3_name}: nothing to configure (unmanaged switch / no console config) — skipped")
             results.append({
                 "device": ai_name, "status": "skipped",
-                "output": "No commands generated for this device type.",
+                "output": "No configuration needed for this device (unmanaged switch).",
                 "error": "",
             })
             continue
