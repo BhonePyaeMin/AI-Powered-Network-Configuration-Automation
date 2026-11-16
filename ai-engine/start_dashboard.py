@@ -18,6 +18,8 @@ except ImportError as _ie:
     def build_gns3(*a, **kw):      raise RuntimeError(f"ai_scanner import failed: {_ie}")
     def modify_topology(*a, **kw): raise RuntimeError(f"ai_scanner import failed: {_ie}")
 
+import topology_edit
+
 from email.parser import BytesParser
 from email.policy import default
 
@@ -193,16 +195,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._json(400, {"ok": False, "error": "No current topology provided. Upload an image first."})
                     return
 
-                modified = modify_topology(instruction, current_gns3)
+                try:
+                    modified, changes = topology_edit.modify(instruction, current_gns3)
+                except topology_edit.OpError as oe:
+                    self._json(200, {"ok": False, "error": str(oe)})
+                    return
 
-                # Save as modified.gns3
-                modified_file = os.path.join(TOPOLOGY_DIR, 'modified.gns3')
-                os.makedirs(TOPOLOGY_DIR, exist_ok=True)
-                with open(modified_file, 'w', encoding='utf-8') as f:
-                    json.dump(modified, f, indent=2)
+                saved = None
+                if modified.get('source') != 'gns3-live':
+                    # live GNS3 topologies are not written to the tracked sample files
+                    saved = os.path.join(TOPOLOGY_DIR, 'modified.gns3')
+                    os.makedirs(TOPOLOGY_DIR, exist_ok=True)
+                    with open(saved, 'w', encoding='utf-8') as f:
+                        json.dump(modified, f, indent=2)
 
-                self._json(200, {"ok": True, "file": "topology/modified.gns3", "gns3": modified})
-                print(f"[AI MODIFY] modified.gns3 written")
+                self._json(200, {"ok": True, "file": saved, "gns3": modified, "changes": changes})
+                print(f"[AI MODIFY] {'; '.join(changes)}")
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
                 print(f"[ERROR] modify-topology: {e}")
@@ -223,6 +231,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             parts = self.path.split('/')
             if len(parts) == 5:
                 self._handle_gns3_ping_matrix(parts[3])
+            else:
+                self._json(400, {"ok": False, "error": "Invalid path"})
+
+        # ── GNS3 API: Create new website-only devices inside GNS3 ─────────────
+        elif self.path.startswith('/gns3-api/projects/') and self.path.endswith('/sync-devices'):
+            parts = self.path.split('/')
+            if len(parts) == 5:
+                self._handle_gns3_sync_devices(parts[3])
             else:
                 self._json(400, {"ok": False, "error": "Invalid path"})
 
@@ -293,6 +309,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             from gns3_service import run_ping_matrix
             self._json(200, run_ping_matrix(project_id))
         except Exception as e:
+            self._json(500, {"ok": False, "error": str(e)})
+
+    def _handle_gns3_sync_devices(self, project_id: str):
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length) or b'{}')
+            self._json(200, topology_edit.sync_new_devices(
+                project_id, data.get('ai_devices', []), data.get('connections', [])))
+        except topology_edit.OpError as oe:
+            self._json(200, {"ok": False, "error": str(oe)})
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             self._json(500, {"ok": False, "error": str(e)})
 
     def _handle_gns3_report(self, project_id: str):

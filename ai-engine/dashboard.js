@@ -1566,8 +1566,12 @@ async function sendTextMessage() {
             const gns3Data = json.gns3;
             gns3Data._chatLabel = 'modified.gns3';
             currentGns3 = gns3Data;  // update base for chained edits
-            appendChatMessage('bot', 'code', gns3Data, gns3Data);
-            await populateTopologies('modified.gns3');
+            const changes = json.changes || [];
+            appendChatMessage('bot', 'text', changes.length
+                ? changes.map(escHtml).join('<br>') + '<br><em>The dashboard model is updated.</em>'
+                : 'Topology updated.');
+            gns3ApplyModelUpdate(gns3Data, changes);
+            if (gns3Data.source !== 'gns3-live') await populateTopologies('modified.gns3');
         } else {
             appendChatMessage('bot', 'error', `Modification failed: ${json.error}`);
         }
@@ -1983,6 +1987,44 @@ async function gns3OnProjectChange(projectId) {
     }
 }
 
+// ── Model update: show chatbot changes on the dashboard ───────────────────────
+function gns3ApplyModelUpdate(data, changes) {
+    customLinks.length = 0;
+    customLinkCounter = 0;
+    parseAndRender(data);           // topology graph, device cards and counters
+    gns3TryBuildMapping();          // device mapping: new devices show as "None" until they exist in GNS3
+    showToast('success', 'Topology Updated', (changes && changes[0]) || 'Model updated.');
+}
+
+// ── Create website-only devices inside the real GNS3 project ──────────────────
+async function gns3SyncNewDevices() {
+    if (!gns3ProjectId || gns3Busy) return;
+    const btn = document.getElementById('btn-gns3-sync');
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating in GNS3…'; }
+    gns3Log('INFO', 'Creating the new devices in GNS3 (a router needs 1-2 minutes to boot)…');
+    try {
+        const r = await fetch(`/gns3-api/projects/${gns3ProjectId}/sync-devices`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                ai_devices:  gns3AiDevices,
+                connections: (currentGns3 && currentGns3._ai_topology && currentGns3._ai_topology.connections) || []
+            })
+        });
+        const j = await r.json();
+        await gns3SyncServerLogs();
+        if (!j.ok) throw new Error(j.error || 'Could not create the devices');
+        gns3Log('OK', `Created in GNS3: ${(j.created || []).join(', ') || 'nothing new'} (${j.links || 0} link(s))`);
+        showToast('success', 'Devices Created', `${(j.created || []).join(', ')} now exist in GNS3.`);
+        window._autoApplied = false;                 // let the automation configure the new devices too
+        await gns3OnProjectChange(gns3ProjectId);    // re-read GNS3, redraw, re-map, auto-apply
+    } catch (e) {
+        gns3Log('ERROR', `Create in GNS3 failed: ${e.message}`);
+        showToast('fail', 'Create Failed', e.message);
+        if (btn) { btn.disabled = false; btn.textContent = 'Create in GNS3'; }
+    }
+}
+
 // ── Import the real topology of the selected GNS3 project ─────────────────────
 async function gns3LoadLiveTopology(projectId) {
     try {
@@ -2161,10 +2203,20 @@ function gns3RenderMapping() {
     if (!tbody) return;
 
     const unmapped = gns3DeviceMap.filter(m => !m.gns3_id).length;
+    const gnsNames = new Set(gns3Nodes.map(n => String(n.name).toLowerCase().replace(/[^a-z0-9]/g, '')));
+    const newOnly = gns3DeviceMap.filter(m => !m.gns3_id &&
+        !gnsNames.has(String(m.ai_name).toLowerCase().replace(/[^a-z0-9]/g, '')));
     if (infoEl) {
         infoEl.innerHTML = unmapped > 0
             ? `<span class="gns3-map-warn">⚠ ${unmapped} device(s) could not be auto-mapped. Please select manually.</span>`
             : `<span class="gns3-map-ok">✓ All devices mapped automatically</span>`;
+        if (newOnly.length) {
+            infoEl.innerHTML += `<div style="margin-top:.6rem">` +
+                `<span class="gns3-map-warn">New in the website model, not in GNS3 yet: <strong>` +
+                `${newOnly.map(m => escHtml(m.ai_name)).join(', ')}</strong></span> ` +
+                `<button class="gns3-btn gns3-btn-primary" id="btn-gns3-sync" onclick="gns3SyncNewDevices()" ` +
+                `style="margin-left:.6rem">Create in GNS3</button></div>`;
+        }
     }
 
     // AUTOMATION: If all devices mapped automatically and we have a project, auto-apply!
