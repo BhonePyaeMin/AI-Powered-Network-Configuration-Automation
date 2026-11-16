@@ -58,7 +58,7 @@ This will:
 python start_dashboard.py
 ```
 
-Opens `http://localhost:8000/dashboard.html` automatically.
+Opens `http://localhost:8001/dashboard.html` automatically.
 
 ---
 

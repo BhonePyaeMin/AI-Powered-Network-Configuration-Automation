@@ -9,6 +9,28 @@ Welcome to the AI-Based Network Configuration System! This project features a ro
 
 ---
 
+## Run with Docker
+
+Requires Docker Desktop (or Docker Engine + Compose v2.24+).
+
+```bash
+cp .env.example .env        # optional: add GEMINI_API_KEY / GOOGLE_CLIENT_ID
+docker compose up -d --build
+```
+
+| Service | URL | Notes |
+|---|---|---|
+| ai-engine dashboard | http://localhost:8001/dashboard.html | Topology editor, AI scan, GNS3 apply |
+| Web app (Vue) | http://localhost:8086 | MFU Google sign-in; needs `GOOGLE_CLIENT_ID` + IAM service |
+| Backend API | http://localhost:8095/healthz | Node/Express, uses MongoDB + Redis containers |
+
+- `GEMINI_API_KEY` in `.env` enables AI image scan and text-based topology edits.
+- GNS3 is reached at `host.docker.internal:3080`; start your GNS3 server on the host first (set `GNS3_USERNAME`/`GNS3_PASSWORD` if it needs auth).
+- Logs: `docker compose logs -f <service>`. Stop: `docker compose down`.
+- Dashboard only, without Docker: `cd ai-engine && pip install -r requirements.txt && python start_dashboard.py`.
+
+---
+
 ## GNS3 Simulated CLI Features
 
 The `ai-engine` features a fully simulated, interactive GNS3-like Cisco IOS CLI. Every device in the lab topology (Routers, Switches, PCs) supports an active console connection with standard troubleshooting commands.
