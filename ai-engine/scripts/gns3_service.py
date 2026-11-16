@@ -1457,55 +1457,217 @@ def _vpcs_ping(host: str, port: int, targets: list, count: int = 3) -> dict:
     return results
 
 
-def run_ping_matrix(project_id: str, count: int = 3) -> dict:
-    """Ping every PC from every other PC in the project and return real results."""
+def _ip_only(value):
+    """Return a clean IPv4 string, or None if value is not an address (e.g. 'unassigned')."""
+    try:
+        return str(ipaddress.IPv4Address(str(value).split("/")[0].strip()))
+    except ValueError:
+        return None
+
+
+def _sock_read(sock, wait, stop_pattern=None):
+    """Read from a Telnet console for up to `wait` seconds (or until stop_pattern shows up)."""
+    buf, end = b"", time.time() + wait
+    while time.time() < end:
+        try:
+            sock.settimeout(0.25)
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            i, clean = 0, bytearray()
+            while i < len(chunk):
+                if chunk[i] == 255 and i + 2 < len(chunk):
+                    if chunk[i + 1] in (253, 251):
+                        sock.sendall(bytes([255, 252 if chunk[i + 1] == 253 else 254, chunk[i + 2]]))
+                    i += 3
+                else:
+                    clean.append(chunk[i])
+                    i += 1
+            buf += bytes(clean)
+            if stop_pattern and re.search(stop_pattern, buf.decode("ascii", "replace")):
+                time.sleep(0.3)
+                break
+        except socket.timeout:
+            pass
+        except Exception:
+            break
+    return buf.decode("ascii", "replace")
+
+
+def _ios_ping(host: str, port: int, targets: list, count: int = 4) -> dict:
+    """Run `ping <ip> repeat N` on an IOS router console. Returns {ip: {replies, sent, rtt}}."""
+    try:
+        sock = socket.create_connection((host, port), timeout=8)
+    except Exception as e:
+        return {"error": f"console {host}:{port}: {e}"}
+    results = {}
+    try:
+        sock.sendall(b"\r\n")
+        _sock_read(sock, 1.0)
+        sock.sendall(b"end\r\n")
+        _sock_read(sock, 0.8)
+        for ip in targets:
+            sock.sendall(f"ping {ip} repeat {count}\r\n".encode())
+            out = _sock_read(sock, count * 2 + 10, stop_pattern=r"Success rate is[^\n]*\n")
+            m = re.search(r"Success rate is \d+ percent \((\d+)/(\d+)\)"
+                          r"(?:, round-trip min/avg/max = (\d+)/(\d+)/(\d+) ms)?", out)
+            if m:
+                rtt = [float(m.group(i)) for i in (3, 4, 5)] if m.group(3) else []
+                results[ip] = {"replies": int(m.group(1)), "sent": int(m.group(2)), "rtt": rtt}
+            else:
+                results[ip] = {"replies": 0, "sent": count, "rtt": []}
+    finally:
+        sock.close()
+    return results
+
+
+def _read_pc_ip(host: str, port: int):
+    """Actual IPv4 address configured on a VPCS node, or None."""
+    try:
+        out = _console_run(host, port, ["show ip"], gap=1.2, tail=0.8)
+    except Exception:
+        return None
+    m = re.search(r"IP/MASK\s*:\s*(\d+\.\d+\.\d+\.\d+)", out)
+    ip = _ip_only(m.group(1)) if m else None
+    return ip if ip and ip != "0.0.0.0" else None
+
+
+def _l3_inventory(project_id: str) -> dict:
+    """Routers and PCs of a project with their consoles and addresses (planned + actual)."""
     topo = get_project_topology(project_id)
     if not topo.get("ok"):
         return topo
     nodes = get_project_nodes(project_id)
     if not nodes.get("ok"):
         return nodes
-    console_of = {n["name"]: (n.get("console_host", "127.0.0.1"), n.get("console")) for n in nodes["nodes"]}
+    console_of = {n["name"]: (n.get("console_host", "127.0.0.1"), n.get("console"))
+                  for n in nodes["nodes"] if n.get("status") == "started"}
+    devs = [d for d in topo["_ai_topology"]["devices"] if d["type"] in ("router", "pc")]
+    plan = {d["id"]: [i["ip"] for i in d["interfaces"] if _ip_only(i.get("ip"))] for d in devs}
+    kind = {d["id"]: d["type"] for d in devs}
 
-    ips = {}
-    for d in topo["_ai_topology"]["devices"]:
-        if d["type"] == "pc" and d["interfaces"] and d["interfaces"][0].get("ip"):
-            ips[d["id"]] = d["interfaces"][0]["ip"].split("/")[0]
-    try:
-        live = get_live_ips(project_id)
-        for name, ip in (live.get("live_ips") or {}).items():
-            if name in ips and ip and ip != "0.0.0.0":
-                ips[name] = ip.split("/")[0]
-    except Exception:
-        pass
+    actual, lock = {}, threading.Lock()
 
-    pcs = sorted(ips, key=_natural_key)
+    def read_pc(name):
+        host, port = console_of.get(name, (None, None))
+        if port:
+            ip = _read_pc_ip(host, port)
+            if ip:
+                with lock:
+                    actual[name] = ip
+
+    threads = [threading.Thread(target=read_pc, args=(n,)) for n, k in kind.items() if k == "pc"]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return {"ok": True, "console_of": console_of, "plan": plan, "kind": kind, "actual": actual,
+            "names": sorted(kind, key=lambda n: (kind[n] != "router", _natural_key(n)))}
+
+
+def _pick_dest_ip(inv: dict, src: str, dst: str):
+    """Address of `dst` to ping from `src`: the one on a subnet they share, else its first one."""
+    if inv["kind"].get(dst) == "pc" and dst in inv["actual"]:
+        return inv["actual"][dst]
+    src_nets = set()
+    for c in inv["plan"].get(src, []):
+        try:
+            src_nets.add(ipaddress.IPv4Interface(c).network)
+        except ValueError:
+            pass
+    cands = inv["plan"].get(dst, [])
+    for c in cands:
+        try:
+            if ipaddress.IPv4Interface(c).network in src_nets:
+                return _ip_only(c)
+        except ValueError:
+            pass
+    return _ip_only(cands[0]) if cands else None
+
+
+def run_ping_matrix(project_id: str, count: int = 3) -> dict:
+    """Every router and PC pings every other router and PC, on their own consoles."""
+    inv = _l3_inventory(project_id)
+    if not inv.get("ok"):
+        return inv
+    names, kind, console_of = inv["names"], inv["kind"], inv["console_of"]
     out, lock = [], threading.Lock()
 
     def worker(src):
         host, port = console_of.get(src, (None, None))
-        dsts = [d for d in pcs if d != src]
-        res = _vpcs_ping(host, port, [ips[d] for d in dsts], count) if port else {"error": "no console"}
-        for d in dsts:
-            rtts = res.get(ips[d], []) if "error" not in res else []
-            row = {"source": src, "dest": d, "dest_ip": ips[d], "replies": len(rtts), "sent": count,
-                   "status": "SUCCESS" if rtts else "FAIL",
+        pairs = [(d, _pick_dest_ip(inv, src, d)) for d in names if d != src]
+        ips = [ip for _, ip in pairs if ip]
+        if not port:
+            res = {"error": "no console"}
+        elif kind[src] == "pc":
+            res = _vpcs_ping(host, port, ips, count)
+        else:
+            res = _ios_ping(host, port, ips, count + 1)
+        for dst, ip in pairs:
+            replies, sent, rtts = 0, count, []
+            if ip and "error" not in res:
+                r = res.get(ip)
+                if isinstance(r, dict):
+                    replies, sent, rtts = r["replies"], r["sent"], r["rtt"]
+                elif isinstance(r, list):
+                    replies, rtts = len(r), r
+            row = {"source": src, "dest": dst, "dest_ip": ip or "no IP", "replies": replies, "sent": sent,
+                   "status": "SUCCESS" if replies else "FAIL",
                    "min": round(min(rtts), 1) if rtts else None,
                    "avg": round(sum(rtts) / len(rtts), 1) if rtts else None,
                    "max": round(max(rtts), 1) if rtts else None}
             with lock:
                 out.append(row)
 
-    threads = [threading.Thread(target=worker, args=(s,)) for s in pcs]
+    threads = [threading.Thread(target=worker, args=(s,)) for s in names]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    out.sort(key=lambda r: (_natural_key(r["source"]), _natural_key(r["dest"])))
+    order = {n: i for i, n in enumerate(names)}
+    out.sort(key=lambda r: (order[r["source"]], order[r["dest"]]))
     ok = sum(r["status"] == "SUCCESS" for r in out)
     _log("OK" if ok == len(out) else "WARN", f"Ping test: {ok}/{len(out)} paths reachable")
-    return {"ok": True, "results": out}
+    device_ips = {n: ([inv["actual"][n]] if n in inv["actual"] else inv["plan"].get(n, [])) for n in names}
+    return {"ok": True, "results": out, "device_ips": device_ips}
 
+
+def run_single_ping(project_id: str, source: str, target: str, count: int = 4) -> dict:
+    """Ping from one device to an IP or another device and return the console output."""
+    inv = _l3_inventory(project_id)
+    if not inv.get("ok"):
+        return inv
+    names = inv["names"]
+    src = next((n for n in names if n.lower() == source.strip().lower()), None)
+    if not src:
+        return {"ok": False, "error": f"'{source}' is not a router or PC in this project."}
+    host, port = inv["console_of"].get(src, (None, None))
+    if not port:
+        return {"ok": False, "error": f"{src} is not running (no console). Start it in GNS3 first."}
+    ip = _ip_only(target)
+    label = ip
+    if not ip:
+        dst = next((n for n in names if n.lower() == target.strip().lower()), None)
+        if not dst:
+            return {"ok": False, "error": f"'{target}' is neither an IP address nor a known router/PC."}
+        ip = _pick_dest_ip(inv, src, dst)
+        label = f"{dst} ({ip})"
+        if not ip:
+            return {"ok": False, "error": f"{dst} has no IP address yet."}
+
+    if inv["kind"][src] == "pc":
+        cmd, gap = f"ping {ip} -c {count}", count * 3 + 3
+        raw = _console_run(host, port, [cmd], gap=gap, tail=0.5, anchor=cmd, stop=rf"icmp_seq={count}\b")
+        replies = len(re.findall(r"bytes from", raw))
+    else:
+        cmd, gap = f"ping {ip} repeat {count}", count * 2 + 10
+        raw = _console_run(host, port, ["end", cmd], gap=gap, tail=0.5, anchor=cmd,
+                           stop=r"Success rate is[^\n]*\n")
+        m = re.search(r"Success rate is \d+ percent \((\d+)/(\d+)\)", raw)
+        replies = int(m.group(1)) if m else 0
+    _log("OK" if replies else "WARN", f"Manual ping {src} -> {label}: {replies}/{count} replies")
+    return {"ok": True, "source": src, "target": label, "target_ip": ip, "output": raw,
+            "replies": replies, "sent": count, "status": "SUCCESS" if replies else "FAIL"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTOMATION REPORT (PRD FR-6)
@@ -1516,7 +1678,8 @@ _RESULTS_DIR = os.path.normpath(
 )
 
 
-def _console_run(host: str, port: int, cmds: list, gap: float = 1.0, tail: float = 1.5) -> str:
+def _console_run(host: str, port: int, cmds: list, gap: float = 1.0, tail: float = 1.5,
+                 anchor: str = None, stop: str = None) -> str:
     """Send commands to a device console and return what they printed (without old scrollback)."""
     sock = socket.create_connection((host, port), timeout=8)
 
@@ -1548,15 +1711,21 @@ def _console_run(host: str, port: int, cmds: list, gap: float = 1.0, tail: float
     try:
         sock.sendall(b"\r\n")
         out += read(1.0)
-        for c in cmds:
+        for idx, c in enumerate(cmds):
             sock.sendall((c + "\r\n").encode())
-            out += read(gap)
+            last = idx == len(cmds) - 1
+            if stop and last:
+                out += _sock_read(sock, gap, stop_pattern=stop)   # return as soon as the command is done
+            elif stop:
+                out += read(1.0)
+            else:
+                out += read(gap)
         out += read(tail)
     finally:
         sock.close()
     out = out.replace("\r", "")
-    # The console replays its history when we connect; our first command is the last one echoed.
-    cut = out.rfind(cmds[0])
+    # The console replays its history when we connect; the anchor command is the last one echoed.
+    cut = out.rfind(anchor or cmds[0])
     if cut >= 0:
         out = out[cut:]
     return "\n".join(l.rstrip() for l in out.splitlines() if l.strip())
