@@ -183,3 +183,43 @@ def modify_topology(instruction: str, current_gns3: dict) -> dict:
     print("[AI MODIFY] Gemini response received.")
 
     return extract_json(raw_text)
+
+
+# -- Text instruction -> short list of edit operations ---------------------------
+
+OPS_PROMPT = """You edit a network topology. Return a SHORT JSON list of operations - never the full topology.
+
+Current devices: {devices}
+Current links: {links}
+
+User instruction: {instruction}
+
+Return ONLY JSON in this form:
+{{"ops": [ ... ]}}
+Each operation is one of:
+  {{"op": "add", "kind": "pc" or "router" or "switch", "count": 1, "connect_to": "<existing device name or null>"}}
+  {{"op": "remove", "name": "<existing device name>"}}
+  {{"op": "connect", "a": "<device name>", "b": "<device name>"}}
+"""
+
+
+def instruction_to_ops(instruction: str, devices: str, links: str) -> list:
+    """Ask Gemini to turn a free-form request into a few add/remove/connect operations."""
+    load_dotenv(override=True)
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key or api_key == "your_gemini_api_key_here":
+        raise ValueError("That request needs Gemini, but GEMINI_API_KEY is not set in .env. "
+                         "Simple commands like 'add a PC', 'add a router', 'add a switch' work without it.")
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-3.6-flash",
+        safety_settings=SAFETY_SETTINGS,
+        generation_config=genai.GenerationConfig(
+            temperature=0.0, max_output_tokens=1024, response_mime_type="application/json"),
+    )
+    prompt = OPS_PROMPT.format(devices=devices, links=links, instruction=instruction)
+    print(f"[AI MODIFY] Instruction: {instruction}")
+    response = model.generate_content(prompt)
+    data = extract_json(response.text)
+    ops = data.get("ops", []) if isinstance(data, dict) else data
+    return ops if isinstance(ops, list) else []
