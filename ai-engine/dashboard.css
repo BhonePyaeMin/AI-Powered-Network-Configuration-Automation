@@ -234,6 +234,7 @@ h1 {
 .legend-dot { width:8px; height:8px; border-radius:50%; }
 .legend-dot.pc     { background:var(--accent-blue);   box-shadow:0 0 8px var(--accent-blue); }
 .legend-dot.router { background:var(--accent-purple); box-shadow:0 0 8px var(--accent-purple); }
+.legend-dot.switch { background:var(--accent-green);  box-shadow:0 0 8px var(--accent-green); }
 .legend-line { width:26px; height:3px; border-radius:1px; }
 .legend-line.active  { background:rgba(56,189,248,.5); }
 .legend-line.success { background:var(--accent-green); }

@@ -61,6 +61,16 @@
                 </div>
                 <div class="stat-card">
                     <div class="stat-header">
+                        <h3>Total Switches</h3>
+                        <div class="stat-icon-wrapper blue-glow">
+                            <i data-lucide="git-merge" class="stat-icon"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value" id="total-switches">0</div>
+                    <div class="stat-subtitle" id="success-switches">0 Detected</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
                         <h3>Ping Tests</h3>
                         <div class="stat-icon-wrapper green-glow">
                             <i data-lucide="activity" class="stat-icon"></i>
@@ -111,6 +121,7 @@
                     <div class="topology-legend">
                         <div class="legend-item"><span class="legend-dot pc"></span> VPC Node</div>
                         <div class="legend-item"><span class="legend-dot router"></span> Router Node</div>
+                        <div class="legend-item"><span class="legend-dot switch"></span> Switch Node</div>
                         <div class="legend-item"><span class="legend-line active"></span> Active Link</div>
                         <div class="legend-item"><span class="legend-line success"></span> New (Success)</div>
                         <div class="legend-item"><span class="legend-line fail"></span> New (Failed)</div>
@@ -135,6 +146,13 @@
                     </div>
                     <div class="device-grid" id="router-grid"></div>
                 </section>
+                <section class="device-section">
+                    <div class="section-title-bar">
+                        <i data-lucide="git-merge" class="title-bar-icon"></i>
+                        <h2>Switches</h2>
+                    </div>
+                    <div class="device-grid" id="switch-grid"></div>
+                </section>
             </div>
 
 
@@ -145,7 +163,10 @@
                         <i data-lucide="arrow-left-right" class="title-bar-icon"></i>
                         <h2>Connectivity Matrix (Ping Tests)</h2>
                     </div>
-                    <button class="control-btn" id="btn-refresh-ips" onclick="fetchLiveIPs()" style="margin-left: auto; font-size: 0.85rem; padding: 0.4rem 0.8rem; border-color: rgba(59, 130, 246, 0.4); color: #60a5fa;">
+                    <button class="control-btn" id="btn-run-ping" onclick="gns3RunPingTest()" style="margin-left: auto; font-size: 0.85rem; padding: 0.4rem 0.8rem; border-color: rgba(16, 185, 129, 0.4); color: var(--accent-green);">
+                        <i data-lucide="activity"></i> Run Ping Test
+                    </button>
+                    <button class="control-btn" id="btn-refresh-ips" onclick="fetchLiveIPs()" style="margin-left: 0.5rem; font-size: 0.85rem; padding: 0.4rem 0.8rem; border-color: rgba(59, 130, 246, 0.4); color: #60a5fa;">
                         <i data-lucide="refresh-cw"></i> Refresh IPs
                     </button>
                 </div>

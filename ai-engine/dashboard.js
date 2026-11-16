@@ -126,10 +126,12 @@ function parseAndRender(data) {
     });
 
     for (const node of rawNodes) {
-        const isPC = node.name.startsWith('PC') || node.node_type === 'vpcs';
+        const nodeType = (node.node_type || '').toLowerCase();
+        const isPC = node.name.startsWith('PC') || nodeType === 'vpcs';
+        const isSwitch = !isPC && (nodeType.includes('switch') || nodeType === 'ethernet_hub');
         const device = {
             id: node.node_id, name: node.name, status: 'SUCCESS',
-            type: isPC ? 'PC' : 'Router',
+            type: isPC ? 'PC' : isSwitch ? 'Switch' : 'Router',
             x: node.x, y: node.y,
             properties: node.properties || {}
         };
@@ -156,7 +158,7 @@ function parseAndRender(data) {
     }
 
     // Generate dynamic ping tests based on links
-    const pings = allLinks.map((lk, i) => {
+    const pings = data.source === 'gns3-live' ? [] : allLinks.map((lk, i) => {
         const srcName = lk.source?.name || 'Unknown';
         const tgtName = lk.target?.name || 'Unknown';
         const tgtIP   = getIP(tgtName);
@@ -178,6 +180,9 @@ function parseAndRender(data) {
 // RENDER DASHBOARD UI
 // ==========================================
 function renderDashboard(ts, pcs, routers, links, drawings, pings) {
+    const allNodes = pcs.concat(routers);
+    const switches = routers.filter(d => d.type === 'Switch');
+    routers = routers.filter(d => d.type !== 'Switch');
     document.getElementById('report-timestamp').innerHTML =
         `<i data-lucide="clock" class="inline-icon"></i> Status: ${ts}`;
 
@@ -189,6 +194,9 @@ function renderDashboard(ts, pcs, routers, links, drawings, pings) {
     document.getElementById('success-pcs').textContent = `${pcs.filter(p => p.status==='SUCCESS').length} Detected`;
     document.getElementById('total-routers').textContent = routers.length;
     document.getElementById('success-routers').textContent = `${routers.filter(r => r.status==='SUCCESS').length} Detected`;
+    const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    setText('total-switches', switches.length);
+    setText('success-switches', `${switches.filter(d => d.status==='SUCCESS').length} Detected`);
     document.getElementById('total-pings').textContent = pings.length;
     document.getElementById('success-pings').textContent = `${pings.filter(p => p.status==='SUCCESS').length} Successful`;
 
@@ -198,7 +206,7 @@ function renderDashboard(ts, pcs, routers, links, drawings, pings) {
              onmouseleave="onCardLeave('${dev.id}')"
              onclick="onCardClick('${dev.id}')">
             <div class="device-icon-wrapper ${type==='PC'?'pc-icon':'router-icon'}">
-                <i data-lucide="${type==='PC'?'monitor':'router'}"></i>
+                <i data-lucide="${type==='PC'?'monitor':type==='Switch'?'git-merge':'router'}"></i>
             </div>
             <div class="device-details">
                 <div class="device-name">${dev.name}</div>
@@ -213,6 +221,9 @@ function renderDashboard(ts, pcs, routers, links, drawings, pings) {
         pcs.length ? pcs.map(p => mkCard(p,'PC')).join('') : '<div class="loading">No PCs Found...</div>';
     document.getElementById('router-grid').innerHTML =
         routers.length ? routers.map(r => mkCard(r,'Router')).join('') : '<div class="loading">No Routers Found...</div>';
+    const swGrid = document.getElementById('switch-grid');
+    if (swGrid) swGrid.innerHTML =
+        switches.length ? switches.map(d => mkCard(d,'Switch')).join('') : '<div class="loading">No Switches Found...</div>';
 
     const mkRow = p => `
         <tr>
@@ -225,7 +236,7 @@ function renderDashboard(ts, pcs, routers, links, drawings, pings) {
     document.getElementById('ping-body').innerHTML =
         pings.length ? pings.map(mkRow).join('') : '<tr><td colspan="4" class="loading">No Ping Data...</td></tr>';
 
-    renderTopologyGraph(pcs.concat(routers), links, drawings);
+    renderTopologyGraph(allNodes, links, drawings);
     lucide.createIcons();
 }
 
@@ -1948,6 +1959,9 @@ async function gns3OnProjectChange(projectId) {
         gns3Nodes = j.nodes || [];
         gns3Log('OK', `Loaded ${gns3Nodes.length} node(s)`);
 
+        // Make the website show the real GNS3 topology (incl. switches and links)
+        await gns3LoadLiveTopology(projectId);
+
         // Render node badges
         if (nodesEl) {
             nodesEl.innerHTML = gns3Nodes.map(n => {
@@ -1966,6 +1980,83 @@ async function gns3OnProjectChange(projectId) {
         gns3TryBuildMapping();
     } catch (e) {
         gns3Log('ERROR', `Failed to load nodes: ${e.message}`);
+    }
+}
+
+// ── Import the real topology of the selected GNS3 project ─────────────────────
+async function gns3LoadLiveTopology(projectId) {
+    try {
+        const r = await fetch(`/gns3-api/projects/${projectId}/topology`);
+        const j = await r.json();
+        if (!j.ok) { gns3Log('WARN', `Could not import topology from GNS3: ${j.error}`); return false; }
+
+        customLinks.length = 0;
+        customLinkCounter = 0;
+        currentGns3 = j;
+        parseAndRender(j);
+
+        const sel = document.getElementById('topology-selector');
+        if (sel) {
+            let opt = sel.querySelector('option[data-live]');
+            if (!opt) {
+                opt = document.createElement('option');
+                opt.dataset.live = '1';
+                opt.value = '';
+                sel.insertBefore(opt, sel.firstChild);
+            }
+            opt.textContent = `GNS3 live: ${j.name}`;
+            sel.selectedIndex = 0;
+        }
+        gns3Log('OK', `Website topology synced with GNS3 project "${j.name}" ` +
+                      `(${j.topology.nodes.length} devices, ${j.topology.links.length} links)`);
+        return true;
+    } catch (e) {
+        gns3Log('WARN', `Topology import failed: ${e.message}`);
+        return false;
+    }
+}
+
+// ── Real ping test between all PCs (runs on the PCs' consoles) ────────────────
+async function gns3RunPingTest() {
+    if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
+    const body = document.getElementById('ping-body');
+    const btn  = document.getElementById('btn-run-ping');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> Pinging…'; lucide.createIcons({nodes:[btn]}); }
+    if (body) body.innerHTML = '<tr><td colspan="4" class="loading">Running real pings from each PC…</td></tr>';
+    gns3Log('INFO', 'Running real ping tests between all PCs…');
+
+    try {
+        const r = await fetch(`/gns3-api/projects/${gns3ProjectId}/ping-matrix`, { method: 'POST' });
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || 'Ping test failed');
+
+        const rows = j.results || [];
+        const fmt = v => (v === null || v === undefined) ? '—' : v;
+        if (body) {
+            body.innerHTML = rows.length ? rows.map(p => `
+                <tr>
+                    <td class="ping-source"><i data-lucide="arrow-right-left" class="table-icon"></i> ${escHtml(p.source)}</td>
+                    <td class="ping-dest">${escHtml(p.dest_ip)} (${escHtml(p.dest)})</td>
+                    <td><span class="status-pill ${p.status==='SUCCESS'?'status-success':'status-fail'}">
+                        <span class="status-dot-inner"></span>${p.status}</span></td>
+                    <td class="metrics">${p.status==='SUCCESS' ? `${fmt(p.min)}/${fmt(p.avg)}/${fmt(p.max)}` : `${p.replies}/${p.sent} replies`}</td>
+                </tr>`).join('')
+                : '<tr><td colspan="4" class="loading">No PCs with an IP address found...</td></tr>';
+            lucide.createIcons({ nodes: [body] });
+        }
+        const ok = rows.filter(p => p.status === 'SUCCESS').length;
+        const totalEl = document.getElementById('total-pings');
+        const okEl    = document.getElementById('success-pings');
+        if (totalEl) totalEl.textContent = rows.length;
+        if (okEl)    okEl.textContent = `${ok} Successful`;
+        gns3Log(ok === rows.length ? 'OK' : 'WARN', `Ping test: ${ok}/${rows.length} paths reachable`);
+        showToast(ok === rows.length ? 'success' : 'fail', 'Ping Test',
+                  `${ok} of ${rows.length} paths reachable.`);
+    } catch (e) {
+        if (body) body.innerHTML = `<tr><td colspan="4" class="loading">${escHtml(e.message)}</td></tr>`;
+        gns3Log('ERROR', `Ping test failed: ${e.message}`);
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="activity"></i> Run Ping Test'; lucide.createIcons({nodes:[btn]}); }
     }
 }
 
@@ -2252,6 +2343,7 @@ async function gns3ApplyConfig() {
             showToast('success', 'Configuration Applied!', 'All devices configured successfully.');
             gns3Log('OK', 'Configuration apply workflow complete ✓');
             if (verifyBtn) verifyBtn.style.display = '';
+            gns3RunPingTest();
         } else {
             showToast('fail', 'Apply Partially Failed', 'Some devices had errors. Check the log.');
             gns3Log('WARN', 'Apply finished with errors — check log for details');
