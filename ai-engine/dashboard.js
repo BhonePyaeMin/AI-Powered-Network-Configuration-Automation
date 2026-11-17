@@ -1895,6 +1895,12 @@ async function gns3SyncServerLogs() {
     } catch (_) {}
 }
 
+// Tell the user what is missing: not connected yet, or no project chosen
+function gns3NeedProject() {
+    if (!gns3Connected) showToast('fail', 'Not connected to GNS3', 'Open GNS3, click the Connect button in "GNS3 Live Configuration", then select a project.');
+    else showToast('fail', 'No Project', 'Select a GNS3 project first.');
+}
+
 // ── Connect / Disconnect button ───────────────────────────────────────────────
 function gns3SetConnectedUI(connected, text, urlText) {
     const dot  = document.getElementById('gns3-status-dot');
@@ -2161,7 +2167,7 @@ let gns3AutoSyncTimer = null;
 
 async function gns3SyncConsolePings(silent) {
     if (!gns3ProjectId) {
-        if (!silent) showToast('fail', 'No Project', 'Select a GNS3 project first.');
+        if (!silent) gns3NeedProject();
         return;
     }
     const body = document.getElementById('seen-body');
@@ -2214,7 +2220,7 @@ async function gns3ManualPing() {
     const dst = document.getElementById('mp-dst').value.trim();
     const out = document.getElementById('mp-output');
     const btn = document.getElementById('btn-manual-ping');
-    if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
+    if (!gns3ProjectId) { gns3NeedProject(); return; }
     if (!src || !dst) { showToast('fail', 'Missing Input', 'Enter the source device and the destination (IP or device).'); return; }
     out.style.display = 'block';
     out.textContent = `Pinging from ${src} to ${dst} …`;
@@ -2240,7 +2246,7 @@ async function gns3ManualPing() {
 
 // ── Automation report (download + saved in results/) ─────────────────────────
 async function gns3GenerateReport() {
-    if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
+    if (!gns3ProjectId) { gns3NeedProject(); return; }
     const btn = document.getElementById('btn-gns3-report');
     if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> Building report…'; lucide.createIcons({nodes:[btn]}); }
     gns3Log('INFO', 'Generating automation report (reads every device, runs ping tests)…');
@@ -2266,7 +2272,7 @@ async function gns3GenerateReport() {
 
 // ── Real ping test between all PCs (runs on the PCs' consoles) ────────────────
 async function gns3RunPingTest() {
-    if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
+    if (!gns3ProjectId) { gns3NeedProject(); return; }
     const body = document.getElementById('ping-body');
     const btn  = document.getElementById('btn-run-ping');
     if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> Pinging…'; lucide.createIcons({nodes:[btn]}); }
@@ -2642,7 +2648,7 @@ async function gns3ApplyConfig() {
 // ── Verify configuration ──────────────────────────────────────────────────────
 async function gns3VerifyConfig() {
     if (gns3Busy) return;
-    if (!gns3ProjectId) { showToast('fail', 'No Project', 'Select a GNS3 project first.'); return; }
+    if (!gns3ProjectId) { gns3NeedProject(); return; }
 
     gns3Busy = true;
     gns3Log('INFO', 'Starting configuration verification…');
