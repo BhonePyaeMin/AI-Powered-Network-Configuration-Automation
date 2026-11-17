@@ -233,8 +233,8 @@
                                 <p class="section-subtitle">Apply AI-generated config directly to your running GNS3 devices</p>
                             </div>
                         </div>
-                        <button id="btn-gns3-reconnect" class="control-btn gns3-reconnect-btn" onclick="gns3CheckStatus()" title="Reconnect to GNS3">
-                            <i data-lucide="refresh-cw"></i> Reconnect
+                        <button id="btn-gns3-reconnect" class="control-btn gns3-reconnect-btn" onclick="gns3ToggleConnection()" title="Open GNS3 first, then click Connect">
+                            <i data-lucide="plug"></i> <span id="btn-gns3-reconnect-label">Connect</span>
                         </button>
                     </div>
 
@@ -251,9 +251,9 @@
                                 </div>
                                 <div class="gns3-status-body">
                                     <span class="gns3-dot" id="gns3-status-dot"></span>
-                                    <span id="gns3-status-text">Checking…</span>
+                                    <span id="gns3-status-text">Not connected</span>
                                 </div>
-                                <div class="gns3-status-url" id="gns3-status-url"></div>
+                                <div class="gns3-status-url" id="gns3-status-url">Open GNS3, then click Connect.</div>
                             </div>
 
                             <!-- Project Selector Card -->
