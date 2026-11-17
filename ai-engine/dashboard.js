@@ -3,12 +3,10 @@
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     populateTopologies();
-    fetchTopology();
+    fetchTopology();          // starts EMPTY: the topology appears after GNS3 is connected (or an image is scanned)
     setupControls();
     setupScrollZoom();
     initChatbot();
-    // After a brief delay let the base topology render, then overlay manual config
-    setTimeout(loadManualConfig, 600);
 });
 
 let defaultViewBox = "";
@@ -99,12 +97,17 @@ function getIP(name) {
 // ==========================================
 // DATA FETCHING & PARSING
 // ==========================================
+// An empty topology: nothing is drawn until GNS3 is connected or an image is scanned
+function showEmptyTopology() {
+    customLinks.length = 0;
+    customLinkCounter = 0;
+    currentGns3 = null;
+    parseAndRender({ topology: { nodes: [], links: [], drawings: [] }, _ai_topology: { devices: [], connections: [] } });
+}
+
 async function fetchTopology() {
     try {
-        const response = await fetch('topology/KOTHANT.gns3');
-        if (!response.ok) throw new Error('Failed to load topology file');
-        const data = await response.json();
-        parseAndRender(data);
+        showEmptyTopology();
     } catch (error) {
         console.error('Error:', error);
         document.getElementById('global-status').innerHTML =
@@ -1948,6 +1951,7 @@ function gns3Disconnect() {
     const sel = document.getElementById('gns3-project-select');
     if (sel) sel.innerHTML = '<option value="">— Select a project —</option>';
     gns3SetConnectedUI(false, 'Not connected', 'Open GNS3, then click Connect.');
+    showEmptyTopology();
     gns3Log('INFO', 'Disconnected from GNS3');
 }
 
@@ -1974,7 +1978,7 @@ async function gns3CheckStatus(fromConnectButton) {
     const card = document.getElementById('gns3-status-card');
 
     if (dot) dot.className = 'gns3-dot gns3-dot-checking';
-    if (txt) txt.textContent = 'Checking…';
+    if (txt) txt.textContent = 'Connecting…';
 
     try {
         const r = await fetch('/gns3-api/status');
@@ -2007,7 +2011,7 @@ async function gns3CheckStatus(fromConnectButton) {
             gns3Connected = false;
             if (dot)  dot.className  = 'gns3-dot gns3-dot-disconnected';
             if (txt)  txt.textContent = 'Not connected';
-            if (url)  url.textContent = (j.url || '') + '  — is GNS3 open?';
+            if (url)  url.textContent = (j.error || 'GNS3 not reachable').replace(/ EXACT_ERROR=.*$/, '');
             if (card) card.classList.remove('connected');
             gns3Log('ERROR', j.error || 'GNS3 server not reachable');
         }
