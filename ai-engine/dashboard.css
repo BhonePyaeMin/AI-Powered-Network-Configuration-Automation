@@ -509,7 +509,9 @@ tr:hover td { background:rgba(255,255,255,.02); }
     bottom: 28px; right: 28px;
     z-index: 9998;
     display: flex; flex-direction: column; align-items: flex-end; gap: 16px;
+    pointer-events: none;   /* the (invisible) wrapper must not block clicks on the page behind it */
 }
+.chatbot-wrapper .chatbot-fab { pointer-events: auto; }
 
 /* FAB toggle button */
 .chatbot-fab {
