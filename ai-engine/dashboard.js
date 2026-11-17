@@ -1857,10 +1857,9 @@ let gns3Busy        = false;
 let gns3StatusTimer = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+// The dashboard does NOT connect on its own: open GNS3 first, then click the Connect button.
 document.addEventListener('DOMContentLoaded', () => {
-    gns3CheckStatus();
-    // Auto-refresh GNS3 status every 30 s
-    gns3StatusTimer = setInterval(gns3CheckStatus, 30000);
+    gns3SetConnectedUI(false, 'Not connected', 'Open GNS3, then click Connect.');
 }, { once: true });
 
 // ── Log helpers ───────────────────────────────────────────────────────────────
@@ -1896,8 +1895,73 @@ async function gns3SyncServerLogs() {
     } catch (_) {}
 }
 
+// ── Connect / Disconnect button ───────────────────────────────────────────────
+function gns3SetConnectedUI(connected, text, urlText) {
+    const dot  = document.getElementById('gns3-status-dot');
+    const txt  = document.getElementById('gns3-status-text');
+    const url  = document.getElementById('gns3-status-url');
+    const card = document.getElementById('gns3-status-card');
+    const btn  = document.getElementById('btn-gns3-reconnect');
+    const lbl  = document.getElementById('btn-gns3-reconnect-label');
+    if (dot)  dot.className = 'gns3-dot ' + (connected ? 'gns3-dot-connected' : 'gns3-dot-disconnected');
+    if (txt)  txt.textContent = text;
+    if (url && urlText !== undefined) url.textContent = urlText;
+    if (card) card.classList.toggle('connected', connected);
+    if (lbl)  lbl.textContent = connected ? 'Disconnect' : 'Connect';
+    if (btn)  btn.title = connected ? 'Disconnect from GNS3' : 'Open GNS3 first, then click Connect';
+}
+
+async function gns3ToggleConnection() {
+    if (gns3Connected) gns3Disconnect();
+    else await gns3Connect();
+}
+
+async function gns3Connect() {
+    const btn = document.getElementById('btn-gns3-reconnect');
+    if (btn) btn.disabled = true;
+    try {
+        await gns3CheckStatus(true);
+        if (!gns3Connected) {
+            showToast('fail', 'GNS3 not reachable', 'Open the GNS3 application (and wait until it has started), then click Connect again.');
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+function gns3Disconnect() {
+    gns3Connected = false;
+    if (gns3StatusTimer) { clearInterval(gns3StatusTimer); gns3StatusTimer = null; }
+    if (typeof gns3AutoSyncTimer !== 'undefined' && gns3AutoSyncTimer) {
+        const chk = document.getElementById('chk-auto-sync');
+        if (chk) chk.checked = false;
+        gns3ToggleAutoSync(false);
+    }
+    gns3ProjectId = '';
+    gns3Projects = [];
+    const sel = document.getElementById('gns3-project-select');
+    if (sel) sel.innerHTML = '<option value="">— Select a project —</option>';
+    gns3SetConnectedUI(false, 'Not connected', 'Open GNS3, then click Connect.');
+    gns3Log('INFO', 'Disconnected from GNS3');
+}
+
+// While connected, quietly check every 30 s that GNS3 is still there
+async function gns3KeepAlive() {
+    if (!gns3Connected) return;
+    try {
+        const r = await fetch('/gns3-api/status');
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || 'not reachable');
+    } catch (e) {
+        gns3Connected = false;
+        gns3SetConnectedUI(false, 'Connection lost', 'GNS3 stopped answering. Open GNS3 and click Connect.');
+        gns3Log('ERROR', 'GNS3 connection lost');
+        if (gns3StatusTimer) { clearInterval(gns3StatusTimer); gns3StatusTimer = null; }
+    }
+}
+
 // ── Status check ──────────────────────────────────────────────────────────────
-async function gns3CheckStatus() {
+async function gns3CheckStatus(fromConnectButton) {
     const dot  = document.getElementById('gns3-status-dot');
     const txt  = document.getElementById('gns3-status-text');
     const url  = document.getElementById('gns3-status-url');
@@ -1916,13 +1980,28 @@ async function gns3CheckStatus() {
             if (txt)  txt.textContent = `Connected  v${j.version || '?'}`;
             if (url)  url.textContent = j.url || '';
             if (card) card.classList.add('connected');
+            const btnLbl = document.getElementById('btn-gns3-reconnect-label');
+            if (btnLbl) btnLbl.textContent = 'Disconnect';
             gns3Log('OK', `GNS3 server connected — ${j.url} (v${j.version || '?'})`);
+            if (gns3StatusTimer) clearInterval(gns3StatusTimer);
+            gns3StatusTimer = setInterval(gns3KeepAlive, 30000);
             await gns3LoadProjects();
+            // load the project that is open in GNS3 right now
+            const opened = gns3Projects.filter(p => p.status === 'opened');
+            const pick = opened.length ? opened[0] : null;
+            const sel = document.getElementById('gns3-project-select');
+            if (pick && sel && !gns3ProjectId) {
+                sel.value = pick.id;
+                gns3Log('INFO', `Loading the open GNS3 project "${pick.name}"`);
+                await gns3OnProjectChange(pick.id);
+            } else if (!pick) {
+                gns3Log('WARN', 'No project is open in GNS3 yet. Open one in GNS3, then pick it from the list.');
+            }
         } else {
             gns3Connected = false;
             if (dot)  dot.className  = 'gns3-dot gns3-dot-disconnected';
-            if (txt)  txt.textContent = 'Disconnected';
-            if (url)  url.textContent = j.url || '';
+            if (txt)  txt.textContent = 'Not connected';
+            if (url)  url.textContent = (j.url || '') + '  — is GNS3 open?';
             if (card) card.classList.remove('connected');
             gns3Log('ERROR', j.error || 'GNS3 server not reachable');
         }
@@ -2721,7 +2800,7 @@ async function gns3SaveUrl() {
             gns3Log('INFO', `GNS3 server URL changed to ${newUrl}`);
             if (passInput) passInput.value = ''; // clear password after save
             // Reconnect with new settings
-            setTimeout(gns3CheckStatus, 600);
+            setTimeout(() => gns3CheckStatus(true), 600);
         } else {
             showToast('fail', 'Save Failed', j.error || 'Could not update .env');
         }
