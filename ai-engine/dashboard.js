@@ -2031,16 +2031,21 @@ async function gns3LoadProjects() {
         const j = await r.json();
         if (!j.ok) { gns3Log('ERROR', j.error); return; }
 
-        gns3Projects = j.projects || [];
+        // Only projects that are open in GNS3 right now are listed; closed ones are hidden
+        gns3Projects = (j.projects || []).filter(p => p.status === 'opened');
         const sel = document.getElementById('gns3-project-select');
         if (!sel) return;
-        sel.innerHTML = '<option value="">— Select a project —</option>';
+        sel.innerHTML = gns3Projects.length
+            ? '<option value="">— Select a project —</option>'
+            : '<option value="">No project is open in GNS3</option>';
         gns3Projects.forEach(p => {
             const opt = document.createElement('option');
             opt.value = p.id; opt.textContent = `${p.name}  (${p.status})`;
             sel.appendChild(opt);
         });
-        gns3Log('INFO', `Loaded ${gns3Projects.length} project(s)`);
+        gns3Log('INFO', gns3Projects.length
+            ? `Open GNS3 project(s): ${gns3Projects.map(p => p.name).join(', ')}`
+            : 'No project is open in GNS3');
     } catch (e) {
         gns3Log('ERROR', `Failed to load projects: ${e.message}`);
     }
