@@ -118,12 +118,23 @@ def clear_logs():
 # GNS3 REST HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _retry_conn(call, tries: int = 4, pause: float = 0.7):
+    """Run a requests call; retry short connection hiccups (e.g. a momentary Docker DNS failure)."""
+    for attempt in range(tries):
+        try:
+            return call()
+        except requests.exceptions.ConnectionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(pause)
+
+
 def _get(path: str, timeout: int = 10) -> dict:
     """GET /v2/{path} — returns parsed JSON or raises RuntimeError."""
     if not REQUESTS_AVAILABLE:
         raise RuntimeError("'requests' library not installed. Run: pip install requests")
     url, auth = _get_config()
-    resp = requests.get(f"{url}/v2/{path.lstrip('/')}", auth=auth, timeout=timeout, proxies=_NO_PROXY)
+    resp = _retry_conn(lambda: requests.get(f"{url}/v2/{path.lstrip('/')}", auth=auth, timeout=timeout, proxies=_NO_PROXY))
     resp.raise_for_status()
     return resp.json()
 
@@ -132,13 +143,13 @@ def _post(path: str, payload: Optional[dict] = None, timeout: int = 10) -> dict:
     if not REQUESTS_AVAILABLE:
         raise RuntimeError("'requests' library not installed. Run: pip install requests")
     url, auth = _get_config()
-    resp = requests.post(
+    resp = _retry_conn(lambda: requests.post(
         f"{url}/v2/{path.lstrip('/')}",
         json=payload or {},
         auth=auth,
         timeout=timeout,
         proxies=_NO_PROXY,
-    )
+    ))
     resp.raise_for_status()
     try:
         return resp.json()
